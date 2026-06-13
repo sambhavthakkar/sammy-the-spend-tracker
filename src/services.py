@@ -8,7 +8,7 @@ import statistics
 import math
 from src.database import get_db, User, Pocket, Transaction, Commitment, BudgetSnapshot, \
     SavingsGoal, Asset, Liability, GroupSplit, SplitTransaction, SpendingPattern, \
-    BudgetSuggestion, AnomalyAlert, UserStreak
+    BudgetSuggestion, AnomalyAlert, UserStreak, UserCategoryPreference
 from src.expense_parser import expense_parser
 from src.logging_config import get_logger
 import json
@@ -212,6 +212,8 @@ class PocketService:
                     "rollover_balance": pocket.rollover_balance,
                     "alert_pct": pocket.alert_pct,
                     "is_shared": pocket.is_shared,
+                    "rollover_enabled": pocket.rollover_enabled,
+                    "rollover_percentage": pocket.rollover_percentage,
                     "created_at": pocket.created_at.isoformat() if pocket.created_at else None
                 }
                 for pocket in pockets
@@ -248,6 +250,100 @@ class PocketService:
             return {
                 "success": False,
                 "message": f"Error updating pocket spending: {str(e)}"
+            }
+        finally:
+            db.close()
+
+    @staticmethod
+    def configure_pocket_rollover(pocket_id: str, enabled: bool = None, percentage: float = None) -> Dict[str, Any]:
+        """Configure rollover settings for a pocket"""
+        db = get_db()
+        try:
+            pocket = db.query(Pocket).filter(Pocket.id == pocket_id).first()
+            if not pocket:
+                return {
+                    "success": False,
+                    "message": "Pocket not found"
+                }
+
+            # Update rollover settings if provided
+            if enabled is not None:
+                if not isinstance(enabled, bool):
+                    return {
+                        "success": False,
+                        "message": "Enabled must be a boolean value"
+                    }
+                pocket.rollover_enabled = enabled
+
+            if percentage is not None:
+                if not isinstance(percentage, (int, float)) or percentage < 0 or percentage > 100:
+                    return {
+                        "success": False,
+                        "message": "Percentage must be a number between 0 and 100"
+                    }
+                pocket.rollover_percentage = float(percentage)
+
+            pocket.updated_at = datetime.utcnow()
+            db.commit()
+
+            logger.info(f"Updated rollover settings for pocket {pocket_id}")
+            return {
+                "success": True,
+                "message": "Pocket rollover settings updated successfully",
+                "pocket_id": pocket_id,
+                "rollover_enabled": pocket.rollover_enabled,
+                "rollover_percentage": pocket.rollover_percentage
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error configuring pocket rollover: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error configuring pocket rollover: {str(e)}"
+            }
+        finally:
+            db.close()
+
+    @staticmethod
+    def apply_monthly_rollover() -> Dict[str, Any]:
+        """Apply rollover for all pockets at month boundary (called periodically)"""
+        db = get_db()
+        try:
+            # Get all pockets with rollover enabled
+            pockets = db.query(Pocket).filter(Pocket.rollover_enabled == True).all()
+
+            rolled_over_count = 0
+            total_rolled_over_amount = 0.0
+
+            for pocket in pockets:
+                # Calculate unspent amount for the month
+                unspent_amount = pocket.monthly_limit - pocket.spent_mtd
+                if unspent_amount > 0:
+                    # Calculate amount to rollover based on percentage
+                    rollover_amount = unspent_amount * (pocket.rollover_percentage / 100.0)
+                    if rollover_amount > 0:
+                        # Add to rollover balance
+                        pocket.rollover_balance += rollover_amount
+                        # Reset monthly spending (but keep track of what was actually spent)
+                        pocket.spent_mtd = pocket.monthly_limit - (unspent_amount - rollover_amount)
+                        rolled_over_count += 1
+                        total_rolled_over_amount += rollover_amount
+
+            db.commit()
+
+            logger.info(f"Applied monthly rollover to {rolled_over_count} pockets, total amount: {total_rolled_over_amount}")
+            return {
+                "success": True,
+                "message": f"Monthly rollover applied to {rolled_over_count} pockets",
+                "rolled_over_count": rolled_over_count,
+                "total_rolled_over_amount": total_rolled_over_amount
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error applying monthly rollover: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error applying monthly rollover: {str(e)}"
             }
         finally:
             db.close()
@@ -339,6 +435,80 @@ class TransactionService:
                 }
                 for t in transactions
             ]
+        finally:
+            db.close()
+
+    @staticmethod
+    def update_transaction(transaction_id: str, **kwargs) -> Dict[str, Any]:
+        """Update an existing transaction"""
+        db = get_db()
+        try:
+            transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+            if not transaction:
+                return {
+                    "success": False,
+                    "message": "Transaction not found"
+                }
+
+            # Update allowed fields
+            allowed_fields = ['amount', 'category', 'merchant', 'notes']
+            for field, value in kwargs.items():
+                if field in allowed_fields and hasattr(transaction, field):
+                    setattr(transaction, field, value)
+
+            transaction.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(transaction)
+
+            logger.info(f"Updated transaction {transaction_id}")
+            return {
+                "success": True,
+                "message": "Transaction updated successfully",
+                "transaction": {
+                    "id": transaction.id,
+                    "amount": transaction.amount,
+                    "category": transaction.category,
+                    "merchant": transaction.merchant,
+                    "timestamp": transaction.timestamp.isoformat()
+                }
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error updating transaction: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error updating transaction: {str(e)}"
+            }
+        finally:
+            db.close()
+
+    @staticmethod
+    def delete_transaction(transaction_id: str) -> Dict[str, Any]:
+        """Delete a transaction"""
+        db = get_db()
+        try:
+            transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+            if not transaction:
+                return {
+                    "success": False,
+                    "message": "Transaction not found"
+                }
+
+            db.delete(transaction)
+            db.commit()
+
+            logger.info(f"Deleted transaction {transaction_id}")
+            return {
+                "success": True,
+                "message": "Transaction deleted successfully"
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error deleting transaction: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error deleting transaction: {str(e)}"
+            }
         finally:
             db.close()
 
@@ -1996,6 +2166,138 @@ class GamificationService:
                 "success": False,
                 "message": f"Error updating streak: {str(e)}"
             }
+        finally:
+            db.close()
+
+
+class CategoryPreferenceService:
+    """Service for managing user category preferences for transaction categorization"""
+
+    @staticmethod
+    def add_or_update_preference(user_id: str, transaction_description: str, preferred_category: str, confidence: float = 1.0) -> Dict[str, Any]:
+        """Add or update a user's category preference for a transaction description"""
+        db = get_db()
+        try:
+            # Verify user exists
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return {
+                    "success": False,
+                    "message": "User not found"
+                }
+
+            # Validate inputs
+            if not transaction_description or not transaction_description.strip():
+                return {
+                    "success": False,
+                    "message": "Transaction description cannot be empty"
+                }
+
+            if not preferred_category or not preferred_category.strip():
+                return {
+                    "success": False,
+                    "message": "Preferred category cannot be empty"
+                }
+
+            if confidence < 0.0 or confidence > 1.0:
+                return {
+                    "success": False,
+                    "message": "Confidence must be between 0.0 and 1.0"
+                }
+
+            # Check if preference already exists
+            existing_preference = db.query(UserCategoryPreference)\
+                .filter(
+                    UserCategoryPreference.user_id == user_id,
+                    UserCategoryPreference.transaction_description == transaction_description.strip()
+                )\
+                .first()
+
+            if existing_preference:
+                # Update existing preference
+                existing_preference.preferred_category = preferred_category.strip()
+                existing_preference.confidence = confidence
+                existing_preference.updated_at = datetime.utcnow()
+                db.commit()
+
+                logger.info(f"Updated category preference for user {user_id}: '{transaction_description}' -> '{preferred_category}'")
+                return {
+                    "success": True,
+                    "message": "Category preference updated successfully",
+                    "preference_id": existing_preference.id
+                }
+            else:
+                # Create new preference
+                preference = UserCategoryPreference(
+                    user_id=user_id,
+                    transaction_description=transaction_description.strip(),
+                    preferred_category=preferred_category.strip(),
+                    confidence=confidence
+                )
+                db.add(preference)
+                db.commit()
+                db.refresh(preference)
+
+                logger.info(f"Added category preference for user {user_id}: '{transaction_description}' -> '{preferred_category}'")
+                return {
+                    "success": True,
+                    "message": "Category preference added successfully",
+                    "preference_id": preference.id
+                }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error managing category preference: {str(e)}")
+            return {
+                "success": False,
+                "message": f"Error managing category preference: {str(e)}"
+            }
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_user_preferences(user_id: str) -> List[Dict[str, Any]]:
+        """Get all category preferences for a user"""
+        db = get_db()
+        try:
+            preferences = db.query(UserCategoryPreference)\
+                .filter(UserCategoryPreference.user_id == user_id)\
+                .order_by(UserCategoryPreference.created_at.desc())\
+                .all()
+
+            return [
+                {
+                    "id": pref.id,
+                    "transaction_description": pref.transaction_description,
+                    "preferred_category": pref.preferred_category,
+                    "confidence": pref.confidence,
+                    "created_at": pref.created_at.isoformat() if pref.created_at else None,
+                    "updated_at": pref.updated_at.isoformat() if pref.updated_at else None
+                }
+                for pref in preferences
+            ]
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_preferred_category(user_id: str, transaction_description: str) -> Optional[Dict[str, Any]]:
+        """Get the preferred category for a transaction description, if any"""
+        db = get_db()
+        try:
+            preference = db.query(UserCategoryPreference)\
+                .filter(
+                    UserCategoryPreference.user_id == user_id,
+                    UserCategoryPreference.transaction_description == transaction_description.strip()
+                )\
+                .first()
+
+            if preference:
+                return {
+                    "id": preference.id,
+                    "transaction_description": preference.transaction_description,
+                    "preferred_category": preference.preferred_category,
+                    "confidence": preference.confidence
+                }
+            return None
         finally:
             db.close()
 

@@ -131,6 +131,27 @@ def create_app():
         result = PocketService.get_user_pockets(user_id)
         return jsonify({"pockets": result}), 200
 
+    @app.route('/api/pockets/<pocket_id>/rollover', methods=['PUT'])
+    def configure_pocket_rollover(pocket_id):
+        """Configure rollover settings for a pocket"""
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        enabled = data.get('enabled')
+        percentage = data.get('percentage')
+
+        result = PocketService.configure_pocket_rollover(pocket_id, enabled, percentage)
+        status_code = 200 if result["success"] else 400
+        return jsonify(result), status_code
+
+    @app.route('/api/pockets/rollover/apply', methods=['POST'])
+    def apply_monthly_rollover():
+        """Apply monthly rollover to all pockets"""
+        result = PocketService.apply_monthly_rollover()
+        status_code = 200 if result["success"] else 500
+        return jsonify(result), status_code
+
     # Transaction endpoints
     @app.route('/api/transactions/expense', methods=['POST'])
     def log_expense():
@@ -167,6 +188,24 @@ def create_app():
         offset = request.args.get('offset', 0, type=int)
         result = TransactionService.get_user_transactions(user_id, limit, offset)
         return jsonify({"transactions": result}), 200
+
+    @app.route('/api/transactions/<transaction_id>', methods=['PUT'])
+    def update_transaction(transaction_id):
+        """Update an existing transaction"""
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        result = TransactionService.update_transaction(transaction_id, **data)
+        status_code = 200 if result["success"] else 400
+        return jsonify(result), status_code
+
+    @app.route('/api/transactions/<transaction_id>', methods=['DELETE'])
+    def delete_transaction(transaction_id):
+        """Delete a transaction"""
+        result = TransactionService.delete_transaction(transaction_id)
+        status_code = 200 if result["success"] else 400
+        return jsonify(result), status_code
 
     # Commitment endpoints
     @app.route('/api/commitments', methods=['POST'])

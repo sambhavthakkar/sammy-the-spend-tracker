@@ -3,6 +3,7 @@ Command-line interface to simulate WhatsApp interactions for BudgetBot MVP.
 This allows testing the core functionality without actual WhatsApp API integration.
 """
 
+import re
 from datetime import datetime
 from typing import Optional
 from .models import User, TransactionMode
@@ -14,8 +15,14 @@ class BudgetBotCLI:
 
     def __init__(self):
         self.current_user: Optional[User] = None
-        print("🤖 BudgetBot CLI - WhatsApp Native Financial OS")
-        print("=" * 50)
+        self._onboarding_stage: Optional[str] = None  # Tracks onboarding progress: None, 'name', 'phone', 'income'
+        self._onboarding_data: dict = {}  # Temporarily stores collected data during onboarding
+        self._conversation_history: list = []  # Lightweight conversation context
+        self._session_start = datetime.now()
+        self._expenses_logged_session = 0  # Track expenses logged in this session
+        print("👋 Hey there! I'm BudgetBot, your friendly financial helper.")
+        print("I'm here to make managing your money simple and stress-free. 😊")
+        print("\nTo get started, what should I call you?")
 
     def start(self):
         """Main interaction loop"""
@@ -34,29 +41,94 @@ class BudgetBotCLI:
 
     def _show_welcome(self):
         """Show welcome message for new users"""
-        print("\n👋 Hi! I'm BudgetBot, your WhatsApp-native financial assistant.")
-        print("I'll help you track expenses, manage budgets, and stay on top of your money.")
-        print("\nTo get started, tell me your name and phone number:")
-        print("Example: 'My name is Priya and my number is 9876543210'")
+        print("\n👋 Hey there! I'm BudgetBot, your friendly financial helper.")
+        print("I'm here to make managing your money simple and stress-free.")
+        print("\nTo get started, what should I call you?")
 
     def _handle_onboarding(self, user_input: str):
         """Handle user onboarding flow"""
-        # Simple name/phone extraction
-        name_match = re.search(r'(?:name is|i\'m|i am|call me)\s+([a-zA-Z\s]+)', user_input, re.IGNORECASE)
-        phone_match = re.search(r'(\d{10})', user_input)
+        # If we don't have a name yet, try to extract it
+        if not hasattr(self, '_onboarding_name'):
+            name_match = re.search(r'(?:name is|i\'m|i am|call me)\s+([a-zA-Z\s]+)', user_input, re.IGNORECASE)
+            if name_match:
+                self._onboarding_name = name_match.group(1).strip()
+                print(f"\n👋 Nice to meet you, {self._onboarding_name}! 😊")
+                print("What's your best contact number? (WhatsApp works best)")
+                return
+            else:
+                # If no name pattern matched, use the input as name or ask again
+                self._onboarding_name = user_input.strip() or "Friend"
+                print(f"\n👋 Great to meet you, {self._onboarding_name}!")
+                print("What's your best contact number? (WhatsApp works best)")
+                return
 
-        name = name_match.group(1).strip() if name_match else "User"
-        phone = phone_match.group(1) if phone_match else "0000000000"
+        # If we have name but not phone yet, extract phone
+        if not hasattr(self, '_onboarding_phone'):
+            phone_match = re.search(r'(\d{10})', user_input)
+            if phone_match:
+                self._onboarding_phone = phone_match.group(1)
+                print(f"\n📱 Got it! Your number ending in {self._onboarding_phone[-4:]} is saved.")
+                print("Almost there! To give you personalized advice, what's your monthly income?")
+                print("(You can type 'skip' if you'd rather not share this yet)")
+                return
+            else:
+                # Try to extract any number sequence that looks like a phone
+                numbers = re.findall(r'\d+', user_input)
+                if numbers:
+                    # Take the longest number sequence that could be a phone
+                    potential_phones = [n for n in numbers if len(n) >= 10 and len(n) <= 15]
+                    if potential_phones:
+                        self._onboarding_phone = max(potential_phones, key=len)
+                        print(f"\n📱 Got it! Your number ending in {self._onboarding_phone[-4:]} is saved.")
+                        print("Almost there! To give you personalized advice, what's your monthly income?")
+                        print("(You can type 'skip' if you'd rather not share this yet)")
+                        return
 
-        # Create user
-        self.current_user = budget_manager.create_user(phone=phone, name=name)
-        print(f"\n✅ Great to meet you, {name}! I've created your account.")
-        print(f"📱 Your phone: {phone}")
-        print(f"🆔 Your user ID: {self.current_user.id[:8]}...")
+                print("Hmm, I don't see a valid phone number there. Could you share your 10-digit phone number?")
+                return
 
-        # Ask for income
-        print("\n💰 To give you personalized budget insights, what's your monthly income?")
-        print("(You can skip this for now by typing 'skip')")
+        # We have both name and phone, now handle income
+        if user_input.lower().strip() == 'skip':
+            income = 0.0
+            print("\n👍 No worries! We'll skip income for now. You can always add it later.")
+        else:
+            # Try to extract income amount
+            income_match = re.search(r'[\d,]+(?:\.\d{1,2})?', user_input.replace(',', ''))
+            if income_match:
+                try:
+                    income = float(income_match.group())
+                    if income < 0:
+                        income = 0.0
+                        print("\n🤔 Income can't be negative, so I'll set it to zero for now. You can update it later!")
+                    elif income > 10000000:  # 1 crore - reasonable upper bound
+                        print("\n🤔 That seems quite high! Did you mean to enter a different amount?")
+                        print("Please share your monthly income (or type 'skip' to skip):")
+                        return
+                    else:
+                        print(f"\n💰 Got it! I'll use ₹{income:,.0f} as your monthly income for personalized insights.")
+                except ValueError:
+                    income = 0.0
+                    print("\n🤔 I didn't catch that amount. No worries - we'll skip income for now. You can add it later!")
+            else:
+                income = 0.0
+                print("\n🤔 I didn't catch that amount. No worries - we'll skip income for now. You can add it later!")
+
+        # Create user with collected information
+        self.current_user = budget_manager.create_user(phone=self._onboarding_phone, name=self._onboarding_name)
+
+        # Clean up onboarding attributes
+        if hasattr(self, '_onboarding_name'):
+            delattr(self, '_onboarding_name')
+        if hasattr(self, '_onboarding_phone'):
+            delattr(self, '_onboarding_phone')
+
+        # Warm welcome completion with contextual touch
+        print(f"\n🎉 Welcome aboard, {self.current_user.name}! 🎉")
+        print("You're all set up and ready to take control of your money.")
+        print("💡 To get started, try telling me about your first expense:")
+        print("   Something like 'lunch 250' or 'coffee 120' or 'uber 150'")
+        print("   Just tell me what you spent and on what - I'll handle the rest!")
+        print("\n😊 Remember, I'm here to help, not judge. Every step counts!")
 
     def _show_prompt(self):
         """Show command prompt with user context"""
@@ -72,48 +144,79 @@ class BudgetBotCLI:
         # Handle special commands
         if user_input.lower() == 'help':
             self._show_help()
+            self._add_to_conversation_history(user_input, 'help')
             return
         elif user_input.lower() == 'balance':
             self._show_balance()
+            self._add_to_conversation_history(user_input, 'balance')
             return
         elif user_input.lower() == 'commitments':
             self._show_commitments()
+            self._add_to_conversation_history(user_input, 'commitments')
             return
         elif user_input.lower() == 'goals':
             self._show_savings_goals()
+            self._add_to_conversation_history(user_input, 'goals')
             return
         elif user_input.lower() == 'suggest budget':
             self._suggest_budget()
+            self._add_to_conversation_history(user_input, 'suggest_budget')
             return
         elif user_input.lower() == 'net worth':
             self._show_net_worth()
+            self._add_to_conversation_history(user_input, 'net_worth')
             return
         elif user_input.lower() == 'anomalies':
             self._show_anomalies()
+            self._add_to_conversation_history(user_input, 'anomalies')
             return
         elif user_input.lower() == 'streak':
             self._update_streak()
+            self._add_to_conversation_history(user_input, 'streak')
             return
         elif user_input.lower() == 'achievements':
             self._show_achievements()
+            self._add_to_conversation_history(user_input, 'achievements')
+            return
+        elif user_input.lower() == 'apply rollover':
+            self._handle_apply_rollover(user_input)
+            self._add_to_conversation_history(user_input, 'apply_rollover')
             return
         elif user_input.lower().startswith('add pocket'):
             self._handle_add_pocket(user_input)
+            self._add_to_conversation_history(user_input, 'add_pocket')
             return
         elif user_input.lower().startswith('add goal'):
             self._handle_add_goal(user_input)
+            self._add_to_conversation_history(user_input, 'add_goal')
             return
         elif user_input.lower().startswith('split'):
             self._handle_split_command(user_input)
+            self._add_to_conversation_history(user_input, 'split')
+            return
+        elif user_input.lower().startswith('fix '):
+            self._handle_fix_transaction(user_input)
+            self._add_to_conversation_history(user_input, 'fix_transaction')
+            return
+        elif user_input.lower().startswith('remove '):
+            self._handle_remove_transaction(user_input)
+            self._add_to_conversation_history(user_input, 'remove_transaction')
+            return
+        elif user_input.lower().startswith('rollover '):
+            self._handle_rollover_command(user_input)
+            self._add_to_conversation_history(user_input, 'rollover_command')
             return
         elif user_input.lower().startswith('add sip') or user_input.lower().startswith('add emi') or user_input.lower().startswith('add subscription'):
             self._handle_add_commitment(user_input)
+            self._add_to_conversation_history(user_input, 'add_commitment')
             return
         elif user_input.lower() == 'alerts':
             self._show_alerts()
+            self._add_to_conversation_history(user_input, 'alerts')
             return
         elif user_input.lower() == 'upcoming':
             self._show_upcoming_deductions()
+            self._add_to_conversation_history(user_input, 'upcoming_deductions')
             return
 
         # Try to parse as expense
@@ -124,13 +227,69 @@ class BudgetBotCLI:
                 mode="personal"
             )
             self._respond_to_expense(transaction)
+            self._add_to_conversation_history(user_input, 'expense_logged')
         except Exception as e:
-            print(f"\n🤖 Sorry, I didn't understand that. Try saying something like:")
-            print("   'lunch 250' or 'uber 450' or 'add pocket Food 5000'")
-            print(f"   Error: {str(e)}")
+            # More helpful, intent-aware error response
+            user_lower = user_input.lower().strip()
+
+            # Try to guess what the user might have wanted to do
+            suggested_actions = []
+
+            # Check for expense-like patterns
+            if any(word in user_lower for word in ['spent', 'paid', 'bought', 'cost', 'expense']):
+                suggested_actions.append("It looks like you might want to log an expense. Try something like 'lunch 250' or 'uber 450'")
+
+            # Check for budget/pocket patterns
+            if any(word in user_lower for word in ['budget', 'pocket', 'limit']):
+                suggested_actions.append("It seems like you want to manage your budget. Try 'add pocket Food 5000' or 'balance'")
+
+            # Check for goal patterns
+            if any(word in user_lower for word in ['goal', 'save', 'saving']):
+                suggested_actions.append("Looks like you want to set a savings goal. Try 'add goal Emergency Fund 100000'")
+
+            # Check for split patterns
+            if any(word in user_lower for word in ['split', 'share', 'owe']):
+                suggested_actions.append("Are you trying to split a bill? Try 'split Roommates Groceries 3000 equal'")
+
+            # Check for suggestion patterns
+            if any(word in user_lower for word in ['suggest', 'advice', 'recommend']):
+                suggested_actions.append("Want budget suggestions? Try 'suggest budget'")
+
+            # Check for net worth patterns
+            if any(word in user_lower for word in ['worth', 'asset', 'liability', 'net']):
+                suggested_actions.append("Checking your net worth? Try 'net worth'")
+
+            # Check for anomaly patterns
+            if any(word in user_lower for word in ['unusual', 'strange', 'odd', 'anomaly']):
+                suggested_actions.append("Looking for unusual spending? Try 'anomalies'")
+
+            # Check for streak/achievement patterns
+            if any(word in user_lower for word in ['streak', 'achievement', 'milestone']):
+                suggested_actions.append("Want to check your progress? Try 'streak' or 'achievements'")
+
+            # If we have suggestions, show them
+            if suggested_actions:
+                print(f"\n🤖 Hmm, I'm not sure I understood that. ")
+                print("Here's what I think you might have meant:")
+                for i, suggestion in enumerate(suggested_actions[:2], 1):  # Show max 2 suggestions
+                    print(f"   {i}. {suggestion}")
+                print("\n💡 Or just tell me what you'd like to do in your own words!")
+            else:
+                # Generic helpful response
+                print(f"\n🤖 I'm not quite sure I got that. No worries!\n"
+                      f"Let me help you out:\n"
+                      f"   💰 To log an expense: 'lunch 250' or 'uber 450'\n"
+                      f"   🏦 To manage budgets: 'add pocket Food 5000' or 'balance'\n"
+                      f"   🎯 To set goals: 'add goal Emergency Fund 100000'\n"
+                      f"   🔪 To split bills: 'split Roommates Groceries 3000 equal'\n"
+                      f"   💡 For advice: 'suggest budget'\n"
+                      f"   📊 To check status: 'net worth' or 'anomalies'\n"
+                      f"Just try one of these, or tell me what you had in mind!")
+
+            self._add_to_conversation_history(user_input, 'unrecognized')
 
     def _respond_to_expense(self, transaction: Transaction):
-        """Generate response after logging an expense"""
+        """Generate response after logging an expense - more human/comfortable version"""
         # Get updated budget snapshot
         snapshot = budget_manager.get_budget_snapshot(self.current_user.id)
 
@@ -168,110 +327,233 @@ class BudgetBotCLI:
                 pocket = p
                 break
 
-        # Format response
-        response = f"✅ ₹{transaction.amount:.0f} → {transaction.category}"
+        # More natural, varied responses
+        import random
+
+        # Base transaction description
         if transaction.merchant and transaction.merchant != "Unknown":
-            response += f" ({transaction.merchant})"
+            base_desc = f"Logged ₹{transaction.amount:.0f} for {transaction.category} at {transaction.merchant}"
+        else:
+            base_desc = f"Logged ₹{transaction.amount:.0f} for {transaction.category}"
+
+        # Varied response starters
+        starters = [
+            "Got it!",
+            "Nice!",
+            "Perfect!",
+            "Alright!",
+            "Cool!",
+            "Thanks!",
+            "Awesome!",
+            "Great!",
+            "Thanks for sharing!",
+            "Noted!"
+        ]
+
+        starter = random.choice(starters)
+
+        # Build the response
+        response_parts = [f"{starter} {base_desc}."]
 
         if pocket:
             remaining = pocket.monthly_limit - pocket.spent_mtd
-            response += f"\n📊 {updated_pocket_name} pocket: ₹{remaining:.0f} left this month"
-
-            # Add alert if threshold crossed
             percentage_used = (pocket.spent_mtd / pocket.monthly_limit) * 100 if pocket.monthly_limit > 0 else 0
-            if percentage_used >= 100:
-                response += f"\n⚠️  You've exceeded your {updated_pocket_name} budget!"
-            elif percentage_used >= 90:
-                response += f"\n🔔 You've used 90% of your {updated_pocket_name} budget."
+
+            # Add pocket status in a more natural way
+            if percentage_used < 50:
+                response_parts.append(f"You've got ₹{remaining:.0f} left in your {updated_pocket_name} pocket this month.")
+            elif percentage_used < 70:
+                response_parts.append(f"You've used about {int(percentage_used)}% of your {updated_pocket_name} pocket - you're doing well!")
+            elif percentage_used < 90:
+                response_parts.append(f"You've used {int(percentage_used)}% of your {updated_pocket_name} pocket. You've got ₹{remaining:.0f} left.")
+            else:
+                # High usage but not yet alert threshold
+                response_parts.append(f"Heads up: you've used {int(percentage_used)}% of your {updated_pocket_name} pocket. Only ₹{remaining:.0f} left for the month.")
+
+            # Add occasional insights based on spending (lightweight, not computational heavy)
+            # Just simple observational comments to feel more human
+            if transaction.category.lower() in ['food', 'dining', 'groceries']:
+                food_insights = [
+                    "Hope you enjoyed your meal!",
+                    "Food is such an important part of wellbeing - hope it was satisfying!",
+                    "Nice to see you investing in good food!",
+                    "Food expenses are important - tracking them helps you stay mindful!",
+                    "Remember to enjoy your meals mindfully!"
+                ]
+                # Occasionally add a food-related insight (20% chance)
+                if random.random() < 0.2:
+                    response_parts.append(random.choice(food_insights))
+            elif transaction.category.lower() in ['transport', 'fuel', 'commute']:
+                transport_insights = [
+                    "Hope your commute was smooth!",
+                    "Getting around efficiently saves both time and money!",
+                    "Transport costs can really add up - good you're tracking them!",
+                    "Consider combining trips when possible to save on fuel!",
+                    "Every kilometer tracked helps you understand your mobility patterns!"
+                ]
+                if random.random() < 0.2:
+                    response_parts.append(random.choice(transport_insights))
+        else:
+            # No specific pocket found
+            response_parts.append(f"This expense has been recorded. You can create a specific pocket for {transaction.category} if you'd like to track it separately.")
+
+        # Add occasional general helpful tips (10% chance)
+        if random.random() < 0.1:
+            tips = [
+                "💡 Tip: Try reviewing your expenses weekly to spot patterns!",
+                "💡 Tip: Small consistent savings add up over time!",
+                "💡 Tip: Tracking helps you make intentional choices about your money!",
+                "💡 Tip: Financial awareness is the first step to financial freedom!",
+                "💡 Tip: You're building great money habits - keep it up!"
+            ]
+            response_parts.append(random.choice(tips))
+
+        # Add subtle contextual touch based on session
+        self._expenses_logged_session += 1
+        if self._expenses_logged_session == 1:
+            # First expense of the session
+            response_parts.append("🎉 Great start! Tracking your first expense is the first step to financial awareness.")
+        elif self._expenses_logged_session == 5:
+            # Fifth expense - acknowledge consistency
+            response_parts.append("👍 Nice consistency! You're building a great habit of tracking your spending.")
+        elif self._expenses_logged_session == 10:
+            # Tenth expense - celebrate the milestone
+            response_parts.append("🏆 Awesome! You've logged 10 expenses this session - you're really getting the hang of this!")
+
+        # Format the main response
+        response = " ".join(response_parts)
 
         print(f"\n🤖 {response}")
 
-        # Show any budget alerts
+        # Show any budget alerts (these remain important and should be prominent)
         alerts = budget_manager.check_budget_alerts(self.current_user.id)
-        for alert in alerts:
-            if alert["severity"] in ["high", "medium"]:
-                print(f"\n{alert['message']}")
+        high_medium_alerts = [alert for alert in alerts if alert["severity"] in ["high", "medium"]]
+        if high_medium_alerts:
+            print()  # Add spacing
+            for alert in high_medium_alerts:
+                icon = {"high": "🔴", "medium": "🟠"}.get(alert["severity"], "⚪")
+                print(f"{icon} {alert['message']}")
 
     def _show_help(self):
-        """Show available commands"""
-        help_text = """
-📋 BudgetBot Commands:
-=====================
-Expense Logging:
-  • 'lunch 250' - Log an expense
-  • 'uber 450' - Log transport expense
-  • 'sabzi 340' - Log groceries
+        """Show available commands - more welcoming and less overwhelming"""
+        print("\n👋 Hey there! I'm here to help you with your money.")
+        print("Think of me as your friendly financial helper - no judgment, just helpful insights!")
+        print("\nHere's what you can do with me:")
 
-Budget Management:
-  • 'add pocket Food 5000' - Create a budget pocket
-  • 'add pocket Transport 3000'
+        print("\n💰 **Everyday Money Tracking**")
+        print("   • 'lunch 250' - Log an expense (try: 'coffee 80', 'movie 300', etc.)")
+        print("   • 'uber 450' - Log transport or any other expense")
+        print("   • Just tell me what you spent and on what - I'll figure it out!")
+        print("   • 'fix <transaction_id> <field>=<value>' - Correct a transaction (e.g., 'fix abc123 category=Food')")
+        print("   • 'remove <transaction_id>' - Delete a transaction")
+        print("   • 'apply rollover' - Apply monthly rollover to all pockets")
 
-Commitments:
-  • 'add sip HDFC Flexi Cap 5000 on 10' - Add monthly SIP
-  • 'add emi home loan 25000 on 15' - Add monthly EMI
-  • 'add subscription netflix 649 monthly' - Add subscription
+        print("\n🎯 **Budget & Goals**")
+        print("   • 'add pocket Food 5000' - Set up a budget for groceries, eating out, etc.")
+        print("   • 'add goal Emergency Fund 100000' - Save for something special")
+        print("   • 'balance' - See how you're doing this month")
+        print("   • 'suggest budget' - Get personalized advice based on your spending")
+        print("   • 'rollover <pocket_name> <on/off> [percentage]' - Configure pocket rollover (e.g., 'rollover Food on 80')")
 
-Savings Goals:
-  • 'add goal PocketName GoalName 100000' - Create savings goal (e.g., 'add goal Emergency Fund 50000')
-  • 'goals' - Show your savings goals
+        print("\n👥 **Sharing & Splitting**")
+        print("   • 'split Roommates Groceries 3000 equal' - Split bills with friends/family")
+        print("   • 'owe' - See what you owe/are owed")
+        print("   • Great for shared expenses, trips, or group activities")
 
-Bill Splitting:
-  • 'split GroupName Description Amount Method' - Create group split
-    Methods: equal, percentage, exact
-    Example: 'split Roommates Groceries 3000 equal'
+        print("\n📊 **Insights & Tracking**")
+        print("   • 'net worth' - See your complete financial picture")
+        print("   • 'anomalies' - Check for unusual spending patterns")
+        print("   • 'streak' - See how many days you've logged expenses")
+        print("   • 'achievements' - Check your financial milestones")
 
-Savings & Goals:
-  • 'suggest budget' - Get AI-powered budget suggestions
-  • 'net worth' - Show your net worth
-  • 'anomalies' - Check for unusual spending
-  • 'streak' - Update your logging streak
-  • 'achievements' - Check your achievements
+        print("\n𔒀 **Regular Money Things**")
+        print("   • 'add sip HDFC Flexi Cap 3000 on 10' - Track your investments")
+        print("   • 'add emi home loan 25000 on 15' - Track loan payments")
+        print("   • 'add subscription netflix 649 monthly' - Track recurring bills")
 
-Information:
-  • 'balance' - Show current budget status
-  • 'commitments' - Show your recurring commitments
-  • 'alerts' - Show budget threshold alerts
-  • 'upcoming' - Show upcoming deductions
-  • 'help' - Show this help message
-  • 'exit' - Quit BudgetBot
+        print("\n❓ **Need Help?**")
+        print("   • 'help' - Show this message again")
+        print("   • Just talk to me naturally - I'll do my best to understand!")
+        print("   • Examples: 'My name is Alex and my number is 9876543210'")
 
-Examples:
-  • 'My name is Priya and my number is 9876543210'
-  • 'lunch 250'
-  • 'add pocket Food 5000'
-  • 'add sip HDFC Index Fund 3000 on 5'
-  • 'add goal Emergency Fund 50000'
-  • 'suggest budget'
-  • 'split Roommates Groceries 3000 equal'
-  • 'net worth'
-  • 'balance'
-        """
-        print(help_text)
+        print("\n🚀 **Ready to get started?**")
+        print("   Try telling me about your last expense - like 'lunch 250' or 'coffee 120'")
+        print("   Or if you're setting up, tell me your name to begin! 😊")
 
     def _show_balance(self):
-        """Show current budget snapshot"""
+        """Show current budget snapshot - with more encouraging feedback"""
         if not self.current_user:
             print("\n🤖 Please complete onboarding first.")
             return
 
         snapshot = budget_manager.get_budget_snapshot(self.current_user.id)
 
-        print(f"\n📊 Budget Snapshot for {self.current_user.name}")
-        print("=" * 40)
-        print(f"💰 Monthly Income: ₹{snapshot.total_income:,.0f}")
-        print(f"🔒 Committed Outflows: ₹{snapshot.total_committed:,.0f}")
-        print(f"💵 Available to Spend: ₹{snapshot.available_to_spend:,.0f}")
-        print(f"💸 Actually Spent: ₹{snapshot.total_spent:,.0f}")
+        print(f"\n📊 Here's how you're doing this month, {self.current_user.name}:")
+        print("=" * 50)
+        print(f"💰 Money coming in: ₹{snapshot.total_income:,.0f}")
+        print(f"🔒 Regular bills/commitments: ₹{snapshot.total_committed:,.0f}")
+        print(f"💵 Money you can freely use: ₹{snapshot.available_to_spend:,.0f}")
+        print(f"💸 Actually spent so far: ₹{snapshot.total_spent:,.0f}")
+
+        # Add some encouraging context
+        if snapshot.total_income > 0:
+            savings_rate = ((snapshot.total_income - snapshot.total_spent - snapshot.total_committed) / snapshot.total_income) * 100
+            if savings_rate >= 20:
+                print(f"💚 You're saving about {savings_rate:.0f}% of your income - excellent!")
+            elif savings_rate >= 0:
+                print(f"👍 You're saving {savings_rate:.0f}% of your income - a great start!")
+            else:
+                print(f"📊 You're spending {abs(savings_rate):.0f}% more than your income - let's find ways to optimize!")
 
         if snapshot.pocket_details:
-            print("\n📦 Budget Pockets:")
+            print("\n📦 Your budget buckets:")
+            any_concerns = False
+            any_good_news = False
+
             for pocket_name, details in snapshot.pocket_details.items():
                 budget = details["budget"]
                 spent = details["spent"]
                 remaining = details["remaining"]
                 percent = (spent / budget * 100) if budget > 0 else 0
-                status = "✅" if percent < 70 else "⚠️" if percent < 90 else "🔴"
-                print(f"  {status} {pocket_name}: ₹{spent:.0f}/{budget:.0f} ({percent:.0f}%) - ₹{remaining:.0f} left")
+
+                if percent >= 90:
+                    status = "🔴"
+                    concern_msg = f"You've used {percent:.0f}% of this budget"
+                    any_concerns = True
+                elif percent >= 70:
+                    status = "🟠"
+                    status_msg = f"You've used {percent:.0f}% of this budget"
+                else:
+                    status = "🟢"
+                    status_msg = f"You've used {percent:.0f}% of this budget - plenty of room!"
+                    any_good_news = True
+
+                print(f"  {status} {pocket_name}: ₹{spent:.0f}/{budget:.0f} ({percent:.0f}%)")
+                if percent >= 90:
+                    print(f"      → {concern_msg}")
+                elif percent >= 70:
+                    print(f"      → {status_msg}")
+                else:
+                    print(f"      → {status_msg}")
+
+            # Add overall encouragement
+            if any_concerns and any_good_news:
+                print("\n💡 You've got some areas doing great and some to watch - that's totally normal!")
+            elif any_good_news and not any_concerns:
+                print("\n🚀 You're doing really well with your budgets - keep up the good work!")
+            elif any_concerns and not any_good_news:
+                print("\n📊 Some areas need attention - that's why we track! Small adjustments can make big differences.")
+
+        # Add a motivational touch based on session activity
+        if hasattr(self, '_expenses_logged_session'):
+            if self._expenses_logged_session == 0:
+                print("\n🚀 Ready to make your first expense entry? Just tell me what you spent!")
+            elif self._expenses_logged_session < 5:
+                print(f"\n💪 You've logged {self._expenses_logged_session} expenses this session - building that awareness muscle!")
+            elif self._expenses_logged_session < 15:
+                print(f"\n🔥 You're on a roll with {self._expenses_logged_session} expenses tracked - great consistency!")
+            else:
+                print(f"\n🏆 {self._expenses_logged_session} expenses tracked this session - you're really making this a habit!")
 
     def _show_commitments(self):
         """Show user's recurring commitments"""
@@ -737,9 +1019,197 @@ Examples:
                 print(f"   Progress: {achievement['progress']:.0f}/{achievement['threshold']}")
             print()
 
+    def _handle_fix_transaction(self, user_input: str):
+        """Handle fix transaction command"""
+        if not self.current_user:
+            print("\n🤖 Please complete onboarding first.")
+            return
+
+        # Parse: "fix transaction_id field=value"
+        parts = user_input.split()
+        if len(parts) < 3:
+            print("\n🤖 Please specify: fix <transaction_id> <field>=<value>")
+            print("   Example: fix abc123 category=Food")
+            print("   Fields: amount, category, merchant, notes")
+            return
+
+        transaction_id = parts[1]
+
+        # Parse the field=value pairs
+        updates = {}
+        for part in parts[2:]:
+            if '=' in part:
+                field, value = part.split('=', 1)
+                field = field.strip()
+                value = value.strip()
+                updates[field] = value
+            else:
+                print(f"\n🤖 Invalid format: {part}. Use field=value format.")
+                return
+
+        if not updates:
+            print("\n🤖 No updates specified. Use format: field=value")
+            return
+
+        # Convert amount to float if specified
+        if 'amount' in updates:
+            try:
+                updates['amount'] = float(updates['amount'])
+            except ValueError:
+                print("\n🤖 Amount must be a valid number.")
+                return
+
+        # Call the update service
+        from src.services import TransactionService
+        result = TransactionService.update_transaction(transaction_id, **updates)
+
+        if result["success"]:
+            print(f"\n✅ Transaction {transaction_id[:8]}... updated successfully!")
+            if "transaction" in result:
+                trans = result["transaction"]
+                print(f"   💰 Amount: ₹{trans['amount']:.0f}")
+                print(f"   🏷️  Category: {trans['category']}")
+                if trans['merchant'] and trans['merchant'] != "Unknown":
+                    print(f"   🏪 Merchant: {trans['merchant']}")
+                print(f"   📝 Notes: {trans['notes'] or '(none)'}")
+        else:
+            print(f"\n🤖 {result['message']}")
+
+    def _handle_remove_transaction(self, user_input: str):
+        """Handle remove transaction command"""
+        if not self.current_user:
+            print("\n🤖 Please complete onboarding first.")
+            return
+
+        # Parse: "remove transaction_id"
+        parts = user_input.split()
+        if len(parts) < 2:
+            print("\n🤖 Please specify: remove <transaction_id>")
+            print("   Example: remove abc123")
+            return
+
+        transaction_id = parts[1]
+
+        # Call the delete service
+        from src.services import TransactionService
+        result = TransactionService.delete_transaction(transaction_id)
+
+        if result["success"]:
+            print(f"\n🗑️  Transaction {transaction_id[:8]}... deleted successfully!")
+        else:
+            print(f"\n🤖 {result['message']}")
+
+    def _handle_rollover_command(self, user_input: str):
+        """Handle rollover command for pocket configuration"""
+        if not self.current_user:
+            print("\n🤖 Please complete onboarding first.")
+            return
+
+        # Parse: "rollover <pocket_name> <on/off> [percentage]"
+        parts = user_input.split()
+        if len(parts) < 3:
+            print("\n🤖 Please specify: rollover <pocket_name> <on/off> [percentage]")
+            print("   Examples: rollover Food on, rollover Food off 50, rollover Food on 100")
+            return
+
+        pocket_name = parts[1]
+        enabled_str = parts[2].lower()
+
+        # Parse enabled/disabled
+        if enabled_str in ['on', 'true', 'yes', '1']:
+            enabled = True
+        elif enabled_str in ['off', 'false', 'no', '0']:
+            enabled = False
+        else:
+            print("\n🤖 Please specify 'on' or 'off' for rollover status")
+            return
+
+        # Parse optional percentage
+        percentage = None
+        if len(parts) >= 4:
+            try:
+                percentage = float(parts[3])
+                if percentage < 0 or percentage > 100:
+                    print("\n🤖 Percentage must be between 0 and 100")
+                    return
+            except ValueError:
+                print("\n🤖 Percentage must be a valid number")
+                return
+
+        # Find the pocket ID by name
+        from src.services import PocketService
+        pockets = PocketService.get_user_pockets(self.current_user.id)
+        pocket_id = None
+        for pocket in pockets:
+            if pocket["name"].lower() == pocket_name.lower():
+                pocket_id = pocket["id"]
+                break
+
+        if not pocket_id:
+            print(f"\n🤖 Pocket '{pocket_name}' not found. Please create it first with 'add pocket {pocket_name} [amount]'")
+            return
+
+        # Configure the rollover settings
+        result = PocketService.configure_pocket_rollover(pocket_id, enabled, percentage)
+
+        if result["success"]:
+            status = "enabled" if result["rollover_enabled"] else "disabled"
+            print(f"\n🔄 Rollover {status} for pocket '{result['pocket_id'][:8]}...'")
+            print(f"   📊 Rollover percentage: {result['rollover_percentage']}%")
+            if result["rollover_enabled"]:
+                print(f"   💡 Unspent funds will roll over to next month according to this percentage")
+            else:
+                print(f"   💡 Rollover disabled - unspent funds will not carry over")
+        else:
+            print(f"\n🤖 {result['message']}")
+
+    def _handle_apply_rollover(self, user_input: str):
+        """Handle apply rollover command"""
+        if not self.current_user:
+            print("\n🤖 Please complete onboarding first.")
+            return
+
+        # Call the apply rollover service
+        from src.services import PocketService
+        result = PocketService.apply_monthly_rollover()
+
+        if result["success"]:
+            print(f"\n🔄 {result['message']}")
+            if result["rolled_over_count"] > 0:
+                print(f"   💰 Total amount rolled over: ₹{result['total_rolled_over_amount']:.2f}")
+                print(f"   📊 Pockets affected: {result['rolled_over_count']}")
+            else:
+                print(f"   💡 No rollover needed at this time")
+        else:
+            print(f"\n🤖 {result['message']}")
+
+    def _add_to_conversation_history(self, user_input: str, bot_response_type: str = ""):
+        """Add exchange to conversation history for light contextual awareness"""
+        self._conversation_history.append({
+            'user': user_input,
+            'bot_response_type': bot_response_type,
+            'timestamp': datetime.now()
+        })
+        # Keep only last 5 exchanges to keep it lightweight
+        if len(self._conversation_history) > 5:
+            self._conversation_history = self._conversation_history[-5:]
+
+    def _get_recent_context(self) -> dict:
+        """Get lightweight context from recent conversation"""
+        if not self._conversation_history:
+            return {}
+
+        last_exchange = self._conversation_history[-1] if self._conversation_history else {}
+        return {
+            'last_user_input': last_exchange.get('user', ''),
+            'last_bot_response_type': last_exchange.get('bot_response_type', ''),
+            'exchange_count': len(self._conversation_history)
+        }
+
 # Import regex here to avoid issues
 import re
 from datetime import datetime
+
 
 if __name__ == "__main__":
     cli = BudgetBotCLI()

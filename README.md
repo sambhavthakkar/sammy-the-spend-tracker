@@ -2,25 +2,26 @@
 
 **BudgetBot** is a WhatsApp-native financial management platform that helps users track expenses, manage budgets, and gain financial intelligence without leaving their favorite messaging app.
 
-This repository contains the **MVP core implementation** with production-ready architecture. API integrations (WhatsApp, Google Sheets, Voice/OCR services) will be incorporated in later phases.
+This repository contains the **enhanced MVP implementation** with production-ready architecture. API integrations (WhatsApp, Google Sheets, Voice/OCR services) are planned for later phases.
 
-## Features Implemented (MVP Core)
+## Features Implemented
 
-✅ **Data Models**: Users, Transactions, Pockets, Commitments  
-✅ **Expense Parser**: Natural language processing for text/voice/bill inputs  
-✅ **Budget Manager**: Envelope budget pockets, commitment tracking, alerts  
-✅ **Service Layer**: Clean separation of concerns with business logic  
-✅ **API Skeleton**: REST endpoints ready for webhook integration  
+✅ **Data Models**: Users, Transactions, Pockets, Commitments, Savings Goals, Assets, Liabilities, Group Splits, Spending Patterns, Budget Suggestions, Anomaly Alerts, User Streaks, User Category Preferences  
+✅ **Expense Parser**: Natural language processing for text/voice/bill inputs with user preference learning  
+✅ **Budget Manager**: Envelope budget pockets with rollover controls, commitment tracking, alerts  
+✅ **Service Layer**: Clean separation of concerns with business logic including transaction management, expense learning, and rollover controls  
+✅ **API Skeleton**: REST endpoints ready for webhook integration including transaction CRUD, pocket rollover configuration, and apply rollover  
 ✅ **Database Abstraction**: SQLAlchemy models with migration support  
 ✅ **Configuration Management**: Environment-based configuration  
 ✅ **Structured Logging**: JSON logging with rotation  
 ✅ **Docker Support**: Containerized deployment ready  
 ✅ **Test Suite**: Basic unit tests for core functionality  
+✅ **Human-Comfort CLI**: Enhanced conversational interface with helpful error recovery and contextual guidance  
 
-## P0 Features Ready for Integration
+## Features Ready for Integration
 
-- Text/voice/bill expense logging with Claude-style NLU
-- Envelope budget pocket system with threshold alerts
+- Text/voice/bill expense logging with Claude-style NLU and user preference learning
+- Envelope budget pocket system with threshold alerts and configurable rollover
 - SIP/EMI/subscription commitment tracking with pre-deduction reminders
 - Committed spend dashboard and discretionary income calculation
 - User-defined reminders and budget threshold notifications
@@ -30,6 +31,9 @@ This repository contains the **MVP core implementation** with production-ready a
 - GST tagging framework and CA-export readiness
 - Google Sheets sync and WhatsApp API integration foundations
 - Context-aware conversation and noise filtering frameworks
+- Transaction update/delete capabilities
+- Expense categorization learning from user corrections
+- Budget pocket rollover controls (enable/disable, percentage configuration)
 
 ## Project Structure
 
@@ -41,9 +45,9 @@ budgetbot/
 │   ├── cli_interface.py   # CLI simulator for testing
 │   ├── config.py          # Environment configuration
 │   ├── database.py        # SQLAlchemy models & DB abstraction
-│   ├── expense_parser.py  # Natural language expense processing
+│   ├── expense_parser.py  # Natural language expense processing with user preference learning
 │   ├── logging_config.py  # Structured logging setup
-│   └── services.py        # Business logic service layer
+│   └── services.py        # Business logic service layer (including transaction management, expense learning, rollover controls)
 ├── tests/                 # Unit tests
 ├── Dockerfile             # Containerization
 ├── docker-compose.yml     # Local development with PostgreSQL/Redis
@@ -74,6 +78,10 @@ Then interact with BudgetBot using commands like:
 - `lunch 250`
 - `add pocket Food 5000`
 - `add sip HDFC Flexi Cap 3000 on 10`
+- `fix abc123 category=Food` (correct a transaction)
+- `remove abc123` (delete a transaction)
+- `rollover Food on 80` (configure rollover for Food pocket)
+- `apply rollover` (apply monthly rollover to all pockets)
 - `balance`
 - `help`
 
@@ -119,10 +127,14 @@ docker-compose up --build
 ### Pockets
 - `POST /api/pockets` - Create budget pocket
 - `GET /api/users/<user_id>/pockets` - Get user's pockets
+- `PUT /api/pockets/<pocket_id>/rollover` - Configure pocket rollover settings
+- `POST /api/pockets/rollover/apply` - Apply monthly rollover to all pockets
 
 ### Transactions
 - `POST /api/transactions/expense` - Log expense from text
 - `GET /api/users/<user_id>/transactions` - Get user transactions
+- `PUT /api/transactions/<transaction_id>` - Update transaction (amount, category, merchant, notes)
+- `DELETE /api/transactions/<transaction_id>` - Delete transaction
 
 ### Commitments
 - `POST /api/commitments` - Add recurring commitment
@@ -154,12 +166,23 @@ Copy `.env.example` to `.env` and customize the values:
 - Feature flags
 - Security settings
 
-## Next Steps for API Integration Phase
+## Ready for API Integration Phase
+
+The enhanced MVP core is now complete and ready for API integration. The following core functionality has been implemented:
+
+✅ **Core Financial Features**: All original MVP features plus enhancements
+✅ **Data Models**: Complete set including transactions, pockets, commitments, goals, assets, liabilities, etc.
+✅ **Service Layer**: Business logic with transaction management, expense learning, rollover controls
+✅ **API Skeleton**: REST endpoints ready for webhook integration including new transaction CRUD and pocket rollover endpoints
+✅ **Database Abstraction**: SQLAlchemy models with proper indexing and relationships
+✅ **Human-Comfort CLI**: Enhanced conversational interface for testing and development
+
+## Next Steps for API Integration
 
 As mentioned in the requirements, the following integrations will be added in subsequent phases:
 
-1. **WhatsApp Business API** - Replace CLI with actual WhatsApp messaging
-2. **Google Sheets API** - Real-time transaction sync to spreadsheets
+1. **WhatsApp Business API** - Replace CLI with actual WhatsApp messaging (webhook endpoints already stubbed)
+2. **Google Sheets API** - Real-time transaction sync to spreadsheets (webhook endpoint already stubbed)
 3. **Voice Processing** - Whisper/Sarvam AI for Hindi/English transcription
 4. **OCR Processing** - Google Vision/Tesseract for bill/receipt scanning
 5. **Database Migration** - Switch from SQLite to PostgreSQL for production
@@ -168,6 +191,8 @@ As mentioned in the requirements, the following integrations will be added in su
 8. **Authentication** - JWT-based security for API endpoints
 9. **Monitoring** - Health checks, metrics, and error tracking
 10. **Deployment** - Kubernetes Helm charts and CI/CD pipelines
+
+**Ready to begin**: Simply implement the WhatsApp and Google Sheets webhook handlers to start receiving/sending messages and syncing data to spreadsheets.
 
 ## License
 

@@ -54,8 +54,8 @@ class ExpenseParser:
         # Clean up merchant text
         merchant = self._extract_merchant(merchant_text) or merchant_text or "Unknown"
 
-        # Determine category
-        category = self._determine_category(merchant_text, text)
+        # Determine category - first check user preferences, then fallback to default logic
+        category = self._determine_category_with_user_preference(user_id, merchant_text, text)
 
         # Create transaction
         transaction = Transaction(
@@ -80,6 +80,17 @@ class ExpenseParser:
                     return merchant.title()
         return None
 
+    def _determine_category_with_user_preference(self, user_id: str, merchant_text: str, full_text: str) -> str:
+        """Determine expense category, first checking user preferences, then using default logic"""
+        # Check if user has a preference for this transaction description
+        from src.services import CategoryPreferenceService
+        preference_result = CategoryPreferenceService.get_preferred_category(user_id, full_text)
+        if preference_result:
+            return preference_result["preferred_category"]
+
+        # Fallback to default category determination logic
+        return self._determine_category(merchant_text, full_text)
+
     def _determine_category(self, merchant_text: str, full_text: str) -> str:
         """Determine expense category based on keywords"""
         combined_text = (merchant_text + " " + full_text).lower()
@@ -90,6 +101,17 @@ class ExpenseParser:
                     return category
 
         return "other"
+
+    def _determine_category_with_user_preference(self, user_id: str, merchant_text: str, full_text: str) -> str:
+        """Determine expense category, first checking user preferences, then using default logic"""
+        # Check if user has a preference for this transaction description
+        from src.services import CategoryPreferenceService
+        preference_result = CategoryPreferenceService.get_preferred_category(user_id, full_text)
+        if preference_result:
+            return preference_result["preferred_category"]
+
+        # Fallback to default category determination logic
+        return self._determine_category(merchant_text, full_text)
 
     def parse_voice_note(self, transcript: str, user_id: str, mode: TransactionMode = TransactionMode.PERSONAL) -> Transaction:
         """

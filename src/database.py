@@ -74,6 +74,9 @@ class Pocket(Base):
     shared_with = Column(Text)  # JSON string of user IDs
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Rollover configuration
+    rollover_enabled = Column(Boolean, default=True)  # Whether rollover is enabled for this pocket
+    rollover_percentage = Column(Float, default=100.0)  # Percentage of unspent amount to rollover (0-100)
 
     # Relationships
     user = relationship("User", back_populates="pockets")
@@ -398,6 +401,28 @@ class UserStreak(Base):
         Index('ix_user_streaks_user_id', 'user_id'),
         Index('ix_user_streaks_streak_type', 'streak_type'),
         Index('ix_user_streaks_current_streak', 'current_streak'),
+    )
+
+
+class UserCategoryPreference(Base):
+    """User-specific category preferences for transaction categorization"""
+    __tablename__ = 'user_category_preferences'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    user_id = Column(String(36), ForeignKey('users.id'), nullable=False)
+    transaction_description = Column(String(200), nullable=False)  # The original transaction text/description
+    preferred_category = Column(String(100), nullable=False)  # The category the user prefers
+    confidence = Column(Float, default=1.0)  # How confident we are in this preference (0.0 to 1.0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = relationship("User")
+
+    __table_args__ = (
+        Index('ix_user_category_preferences_user_id', 'user_id'),
+        Index('ix_user_category_preferences_description', 'transaction_description'),
+        Index('ix_user_category_preferences_category', 'preferred_category'),
     )
 
 
