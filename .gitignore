@@ -1,0 +1,54 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Local databases & runtime data
+*.db
+*.sqlite
+*.sqlite3
+budgetbot.db
+
+# App data
+logs/
+uploads/
+models/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Docker / local overrides
+docker-compose.override.yml
+
+# Jupyter / misc
+.ipynb_checkpoints/
+*.pem
+*.key

@@ -2,6 +2,7 @@
 Database abstraction layer for BudgetBot
 Provides SQLAlchemy models and database session management
 """
+import os
 from datetime import datetime
 from enum import Enum as PyEnum
 from typing import Optional, List
@@ -48,6 +49,10 @@ class User(Base):
     language = Column(String(10), default='en')
     mode = Column(Enum(TransactionMode), default=TransactionMode.PERSONAL)
     income = Column(Float, default=0.0)
+    # Telegram / agent identity
+    telegram_id = Column(String(64), unique=True, nullable=True, index=True)
+    timezone = Column(String(64), default='Asia/Kolkata')
+    currency = Column(String(3), default='INR')
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -55,10 +60,6 @@ class User(Base):
     pockets = relationship("Pocket", back_populates="user", cascade="all, delete-orphan")
     commitments = relationship("Commitment", back_populates="user", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
-
-    __table_args__ = (
-        Index('ix_users_phone', 'phone'),
-    )
 
 class Pocket(Base):
     __tablename__ = 'pockets'
@@ -426,25 +427,160 @@ class UserCategoryPreference(Base):
     )
 
 
+class ProcessedMessage(Base):
+    """Idempotency for inbound chat updates (Telegram update_id, etc.)."""
+    __tablename__ = 'processed_messages'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    provider = Column(String(32), nullable=False)
+    external_id = Column(String(128), nullable=False)
+    user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
+    processed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('provider', 'external_id', name='uq_processed_provider_external'),
+        Index('ix_processed_messages_user_id', 'user_id'),
+    )
+
+
+class ConversationTurn(Base):
+    """Short-term conversation memory for the agent."""
+    __tablename__ = 'conversation_turns'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    user_id = Column(String(36), ForeignKey('users.id'), nullable=False)
+    role = Column(String(20), nullable=False)  # user | assistant | tool | system
+    content = Column(Text)
+    tool_name = Column(String(100))
+    tool_payload = Column(Text)  # JSON
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('ix_conversation_turns_user_created', 'user_id', 'created_at'),
+    )
+
+
+class PendingAction(Base):
+    """Confirmation gate for high-impact tool actions."""
+    __tablename__ = 'pending_actions'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(__import__('uuid').uuid4()))
+    user_id = Column(String(36), ForeignKey('users.id'), nullable=False, index=True)
+    action_type = Column(String(64), nullable=False)
+    payload = Column(Text, nullable=False)  # JSON
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('ix_pending_actions_user_id', 'user_id'),
+    )
+
+
 # Database setup remains unchanged
 
 # Database setup
 def get_database_url() -> str:
-    """Get database URL from config"""
-    return Config.DATABASE_URL
+    """Get database URL from environment (preferred) or config default."""
+    return os.getenv("DATABASE_URL") or Config.DATABASE_URL
 
 def create_database_engine():
     """Create SQLAlchemy engine"""
+    url = get_database_url()
+    connect_args = {}
+    if url.startswith("sqlite"):
+        connect_args["check_same_thread"] = False
     engine = create_engine(
-        get_database_url(),
-        echo=Config.SQLALCHEMY_ECHO,
-        pool_pre_ping=True
+        url,
+        echo=os.getenv("SQLALCHEMY_ECHO", "False").lower() == "true",
+        pool_pre_ping=True,
+        connect_args=connect_args,
     )
     return engine
 
+def _is_already_exists_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "already exists" in msg or "duplicate" in msg
+
+
 def create_tables(engine):
-    """Create all database tables"""
-    Base.metadata.create_all(bind=engine)
+    """
+    Create missing tables safely.
+
+    SQLite + duplicate index names can abort a single create_all() mid-run,
+    leaving newer tables (pending_actions, etc.) missing on existing DBs.
+    So we create table-by-table and ignore 'already exists' errors.
+    """
+    from sqlalchemy import inspect, text
+
+    # Prefer creating only missing tables first
+    try:
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+    except Exception as e:
+        if not _is_already_exists_error(e):
+            # Fall through to per-table creation
+            pass
+
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name in existing:
+            continue
+        try:
+            table.create(bind=engine, checkfirst=True)
+        except Exception as e:
+            if not _is_already_exists_error(e):
+                raise
+
+    # Additive column migrations for existing SQLite DBs
+    _ensure_sqlite_user_columns(engine)
+
+
+def _ensure_sqlite_user_columns(engine) -> None:
+    """Add agent-related columns to users if missing (SQLite only)."""
+    from sqlalchemy import inspect, text
+
+    url = str(engine.url)
+    if not url.startswith("sqlite"):
+        return
+
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return
+
+    cols = {c["name"] for c in inspector.get_columns("users")}
+    alters = []
+    if "telegram_id" not in cols:
+        alters.append("ALTER TABLE users ADD COLUMN telegram_id VARCHAR(64)")
+    if "timezone" not in cols:
+        alters.append("ALTER TABLE users ADD COLUMN timezone VARCHAR(64) DEFAULT 'Asia/Kolkata'")
+    if "currency" not in cols:
+        alters.append("ALTER TABLE users ADD COLUMN currency VARCHAR(3) DEFAULT 'INR'")
+
+    if not alters:
+        return
+
+    with engine.begin() as conn:
+        for stmt in alters:
+            try:
+                conn.execute(text(stmt))
+            except Exception as e:
+                if not _is_already_exists_error(e):
+                    # Column may already exist under race
+                    if "duplicate column" not in str(e).lower():
+                        raise
+
+    # Optional unique index for telegram_id (ignore if present)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "ix_users_telegram_id ON users (telegram_id)"
+                )
+            )
+    except Exception:
+        pass
+
 
 def get_session_local(engine):
     """Get session factory"""
@@ -454,9 +590,18 @@ def get_session_local(engine):
 engine = None
 SessionLocal = None
 
-def init_db():
-    """Initialize database connection"""
+def init_db(reset: bool = False):
+    """Initialize database connection. Set reset=True to rebuild engine (tests)."""
     global engine, SessionLocal
+    if engine is not None and SessionLocal is not None and not reset:
+        # Still ensure tables/columns exist (important after code upgrades)
+        create_tables(engine)
+        return
+    if engine is not None:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
     engine = create_database_engine()
     SessionLocal = get_session_local(engine)
     create_tables(engine)

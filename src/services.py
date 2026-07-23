@@ -8,11 +8,15 @@ import statistics
 import math
 from src.database import get_db, User, Pocket, Transaction, Commitment, BudgetSnapshot, \
     SavingsGoal, Asset, Liability, GroupSplit, SplitTransaction, SpendingPattern, \
-    BudgetSuggestion, AnomalyAlert, UserStreak, UserCategoryPreference
+    BudgetSuggestion, AnomalyAlert, UserStreak, UserCategoryPreference, \
+    ConversationTurn, ProcessedMessage, PendingAction, TransactionSource, TransactionMode
 from src.expense_parser import expense_parser
 from src.logging_config import get_logger
+from src.config import Config
+from src.timeutils.dates import inclusive_datetime_range
 import json
 import logging
+import uuid
 
 logger = get_logger(__name__)
 
@@ -35,11 +39,15 @@ class UserService:
                 }
 
             # Create new user
+            try:
+                mode_enum = TransactionMode(mode.lower()) if isinstance(mode, str) else mode
+            except Exception:
+                mode_enum = TransactionMode.PERSONAL
             user = User(
                 phone=phone,
                 name=name,
                 language=language,
-                mode=mode,
+                mode=mode_enum,
                 income=0.0
             )
             db.add(user)
@@ -77,15 +85,7 @@ class UserService:
         try:
             user = db.query(User).filter(User.id == user_id).first()
             if user:
-                return {
-                    "id": user.id,
-                    "phone": user.phone,
-                    "name": user.name,
-                    "language": user.language,
-                    "mode": user.mode.value,
-                    "income": user.income,
-                    "created_at": user.created_at.isoformat() if user.created_at else None
-                }
+                return UserService._user_to_dict(user)
             return None
         finally:
             db.close()
@@ -97,16 +97,90 @@ class UserService:
         try:
             user = db.query(User).filter(User.phone == phone).first()
             if user:
-                return {
-                    "id": user.id,
-                    "phone": user.phone,
-                    "name": user.name,
-                    "language": user.language,
-                    "mode": user.mode.value,
-                    "income": user.income,
-                    "created_at": user.created_at.isoformat() if user.created_at else None
-                }
+                return UserService._user_to_dict(user)
             return None
+        finally:
+            db.close()
+
+    @staticmethod
+    def _user_to_dict(user: User) -> Dict[str, Any]:
+        return {
+            "id": user.id,
+            "phone": user.phone,
+            "name": user.name,
+            "language": user.language,
+            "mode": user.mode.value if user.mode else "personal",
+            "income": user.income or 0.0,
+            "telegram_id": getattr(user, "telegram_id", None),
+            "timezone": getattr(user, "timezone", None) or Config.AGENT_TIMEZONE_DEFAULT,
+            "currency": getattr(user, "currency", None) or Config.AGENT_CURRENCY_DEFAULT,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        }
+
+    @staticmethod
+    def get_or_create_by_telegram(
+        telegram_id: str,
+        name: Optional[str] = None,
+        language: str = "en",
+    ) -> Dict[str, Any]:
+        """Get or create a user linked to a Telegram id."""
+        db = get_db()
+        try:
+            telegram_id = str(telegram_id)
+            user = db.query(User).filter(User.telegram_id == telegram_id).first()
+            if not user:
+                # Also try synthetic phone from earlier design
+                user = db.query(User).filter(User.phone == f"tg:{telegram_id}").first()
+            if user:
+                if name and user.name in (None, "", "Friend", f"User {telegram_id}"):
+                    user.name = name
+                    db.commit()
+                    db.refresh(user)
+                return {"success": True, "created": False, "user": UserService._user_to_dict(user)}
+
+            display_name = (name or f"User {telegram_id}").strip() or f"User {telegram_id}"
+            user = User(
+                phone=f"tg:{telegram_id}",
+                name=display_name,
+                language=language,
+                mode=TransactionMode.PERSONAL,
+                income=0.0,
+                telegram_id=telegram_id,
+                timezone=Config.AGENT_TIMEZONE_DEFAULT,
+                currency=Config.AGENT_CURRENCY_DEFAULT,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info(f"Created Telegram user {user.id} telegram_id={telegram_id}")
+            return {"success": True, "created": True, "user": UserService._user_to_dict(user)}
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error get_or_create_by_telegram: {e}")
+            return {"success": False, "message": str(e)}
+        finally:
+            db.close()
+
+    @staticmethod
+    def update_profile(user_id: str, **fields) -> Dict[str, Any]:
+        """Update profile fields: name, language, timezone, currency, income."""
+        db = get_db()
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return {"success": False, "message": "User not found"}
+            allowed = {"name", "language", "timezone", "currency", "income"}
+            for key, value in fields.items():
+                if key in allowed and value is not None:
+                    setattr(user, key, value)
+            user.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(user)
+            return {"success": True, "user": UserService._user_to_dict(user)}
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error update_profile: {e}")
+            return {"success": False, "message": str(e)}
         finally:
             db.close()
 
@@ -352,6 +426,21 @@ class TransactionService:
     """Service for transaction-related operations"""
 
     @staticmethod
+    def _txn_to_dict(t: Transaction) -> Dict[str, Any]:
+        return {
+            "id": t.id,
+            "amount": t.amount,
+            "currency": t.currency,
+            "category": t.category,
+            "merchant": t.merchant,
+            "source": t.source.value if t.source else "text",
+            "mode": t.mode.value if t.mode else "personal",
+            "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+            "receipt_url": t.receipt_url,
+            "notes": t.notes,
+        }
+
+    @staticmethod
     def log_expense_text(user_id: str, text: str, mode: str = "personal") -> Dict[str, Any]:
         """Log expense from text input"""
         db = get_db()
@@ -369,14 +458,15 @@ class TransactionService:
                 currency=parsed.currency,
                 category=parsed.category,
                 merchant=parsed.merchant,
-                source=parsed.source,
-                mode=parsed.mode,
+                source=parsed.source if hasattr(parsed, "source") else TransactionSource.TEXT,
+                mode=parsed.mode if hasattr(parsed, "mode") else TransactionMode.PERSONAL,
                 notes=parsed.notes
             )
             db.add(transaction)
+            db.flush()
 
             # Update pocket spending if applicable
-            pocket_update_result = PocketService.update_pocket_spending_by_category(
+            pocket_update_result = TransactionService.update_pocket_spending_by_category(
                 user_id, parsed.category, parsed.amount
             )
 
@@ -388,13 +478,7 @@ class TransactionService:
                 "success": True,
                 "message": "Expense logged successfully",
                 "transaction_id": transaction.id,
-                "transaction": {
-                    "id": transaction.id,
-                    "amount": transaction.amount,
-                    "category": transaction.category,
-                    "merchant": transaction.merchant,
-                    "timestamp": transaction.timestamp.isoformat()
-                },
+                "transaction": TransactionService._txn_to_dict(transaction),
                 "pocket_update": pocket_update_result
             }
         except Exception as e:
@@ -408,33 +492,258 @@ class TransactionService:
             db.close()
 
     @staticmethod
-    def get_user_transactions(user_id: str, limit: int = 50,
-                             offset: int = 0) -> List[Dict[str, Any]]:
-        """Get transactions for a user"""
+    def log_expense_structured(
+        user_id: str,
+        amount: float,
+        category: Optional[str] = None,
+        merchant: str = "",
+        notes: str = "",
+        mode: str = "personal",
+        source: str = "text",
+        timestamp: Optional[datetime] = None,
+        currency: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Log expense from structured agent/tool fields (DB is source of truth)."""
         db = get_db()
         try:
-            transactions = db.query(Transaction)\
-                .filter(Transaction.user_id == user_id)\
-                .order_by(Transaction.timestamp.desc())\
-                .offset(offset)\
-                .limit(limit)\
-                .all()
+            if amount is None or float(amount) <= 0:
+                return {"success": False, "message": "Amount must be a positive number"}
 
-            return [
+            amount = float(amount)
+            merchant = (merchant or "").strip() or "Unknown"
+            notes = (notes or "").strip()
+            text_for_category = notes or merchant
+
+            if not category:
+                # Reuse rule parser category logic without inventing amount
+                category = expense_parser._determine_category_with_user_preference(
+                    user_id, merchant, text_for_category
+                )
+            category = (category or "other").strip().lower()
+
+            try:
+                source_enum = TransactionSource(source.lower())
+            except Exception:
+                source_enum = TransactionSource.TEXT
+            try:
+                mode_enum = TransactionMode(mode.lower())
+            except Exception:
+                mode_enum = TransactionMode.PERSONAL
+
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return {"success": False, "message": "User not found"}
+
+            cur = currency or getattr(user, "currency", None) or Config.AGENT_CURRENCY_DEFAULT
+            txn_ts = timestamp or datetime.utcnow()
+
+            transaction = Transaction(
+                user_id=user_id,
+                amount=amount,
+                currency=cur,
+                category=category,
+                merchant=merchant,
+                source=source_enum,
+                mode=mode_enum,
+                notes=notes or f"{merchant} {amount}".strip(),
+                timestamp=txn_ts,
+            )
+            db.add(transaction)
+            db.flush()
+
+            pocket_update_result = TransactionService.update_pocket_spending_by_category(
+                user_id, category, amount
+            )
+
+            db.commit()
+            db.refresh(transaction)
+            logger.info(f"Structured expense {transaction.id} user={user_id} amount={amount}")
+            return {
+                "success": True,
+                "message": "Expense logged successfully",
+                "transaction_id": transaction.id,
+                "transaction": TransactionService._txn_to_dict(transaction),
+                "pocket_update": pocket_update_result,
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error log_expense_structured: {e}")
+            return {"success": False, "message": str(e)}
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_user_transactions(
+        user_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        category: Optional[str] = None,
+        merchant: Optional[str] = None,
+        timezone: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get transactions for a user with optional date/category filters."""
+        db = get_db()
+        try:
+            q = db.query(Transaction).filter(Transaction.user_id == user_id)
+
+            if from_date or to_date:
+                tz = timezone or Config.AGENT_TIMEZONE_DEFAULT
+                start_s = from_date or "1970-01-01"
+                end_s = to_date or "2999-12-31"
+                start, end = inclusive_datetime_range(start_s, end_s, tz)
+                q = q.filter(Transaction.timestamp >= start, Transaction.timestamp <= end)
+
+            if category:
+                q = q.filter(Transaction.category == category.lower().strip())
+            if merchant:
+                q = q.filter(Transaction.merchant.ilike(f"%{merchant.strip()}%"))
+
+            transactions = (
+                q.order_by(Transaction.timestamp.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            return [TransactionService._txn_to_dict(t) for t in transactions]
+        finally:
+            db.close()
+
+    @staticmethod
+    def sum_spending(
+        user_id: str,
+        from_date: str,
+        to_date: str,
+        category: Optional[str] = None,
+        timezone: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Sum spending for an inclusive date range."""
+        from sqlalchemy import func
+
+        db = get_db()
+        try:
+            tz = timezone or Config.AGENT_TIMEZONE_DEFAULT
+            start, end = inclusive_datetime_range(from_date, to_date, tz)
+            q = db.query(
+                func.coalesce(func.sum(Transaction.amount), 0.0),
+                func.count(Transaction.id),
+            ).filter(
+                Transaction.user_id == user_id,
+                Transaction.timestamp >= start,
+                Transaction.timestamp <= end,
+            )
+            if category:
+                q = q.filter(Transaction.category == category.lower().strip())
+            total, count = q.one()
+            return {
+                "success": True,
+                "from_date": from_date,
+                "to_date": to_date,
+                "category": category,
+                "total": float(total or 0.0),
+                "count": int(count or 0),
+            }
+        except Exception as e:
+            logger.error(f"sum_spending error: {e}")
+            return {"success": False, "message": str(e), "total": 0.0, "count": 0}
+        finally:
+            db.close()
+
+    @staticmethod
+    def spending_breakdown(
+        user_id: str,
+        from_date: str,
+        to_date: str,
+        group_by: str = "category",
+        category: Optional[str] = None,
+        timezone: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Group spending by category, day, or merchant."""
+        from sqlalchemy import func, cast, Date
+
+        db = get_db()
+        try:
+            tz = timezone or Config.AGENT_TIMEZONE_DEFAULT
+            start, end = inclusive_datetime_range(from_date, to_date, tz)
+            group_by = (group_by or "category").lower()
+
+            if group_by == "day":
+                key_col = cast(Transaction.timestamp, Date).label("key")
+            elif group_by == "merchant":
+                key_col = Transaction.merchant.label("key")
+            else:
+                key_col = Transaction.category.label("key")
+                group_by = "category"
+
+            q = db.query(
+                key_col,
+                func.coalesce(func.sum(Transaction.amount), 0.0),
+                func.count(Transaction.id),
+            ).filter(
+                Transaction.user_id == user_id,
+                Transaction.timestamp >= start,
+                Transaction.timestamp <= end,
+            )
+            if category:
+                q = q.filter(Transaction.category == category.lower().strip())
+
+            rows = q.group_by(key_col).order_by(func.sum(Transaction.amount).desc()).all()
+            groups = [
                 {
-                    "id": t.id,
-                    "amount": t.amount,
-                    "currency": t.currency,
-                    "category": t.category,
-                    "merchant": t.merchant,
-                    "source": t.source.value,
-                    "mode": t.mode.value,
-                    "timestamp": t.timestamp.isoformat(),
-                    "receipt_url": t.receipt_url,
-                    "notes": t.notes
+                    "key": str(r[0]) if r[0] is not None else "unknown",
+                    "total": float(r[1] or 0.0),
+                    "count": int(r[2] or 0),
                 }
-                for t in transactions
+                for r in rows
             ]
+            total = sum(g["total"] for g in groups)
+            return {
+                "success": True,
+                "from_date": from_date,
+                "to_date": to_date,
+                "group_by": group_by,
+                "total": total,
+                "groups": groups,
+                "count": sum(g["count"] for g in groups),
+            }
+        except Exception as e:
+            logger.error(f"spending_breakdown error: {e}")
+            return {"success": False, "message": str(e), "total": 0.0, "groups": []}
+        finally:
+            db.close()
+
+    @staticmethod
+    def top_expenses(
+        user_id: str,
+        from_date: str,
+        to_date: str,
+        limit: int = 5,
+        timezone: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        db = get_db()
+        try:
+            tz = timezone or Config.AGENT_TIMEZONE_DEFAULT
+            start, end = inclusive_datetime_range(from_date, to_date, tz)
+            rows = (
+                db.query(Transaction)
+                .filter(
+                    Transaction.user_id == user_id,
+                    Transaction.timestamp >= start,
+                    Transaction.timestamp <= end,
+                )
+                .order_by(Transaction.amount.desc())
+                .limit(limit)
+                .all()
+            )
+            return {
+                "success": True,
+                "from_date": from_date,
+                "to_date": to_date,
+                "transactions": [TransactionService._txn_to_dict(t) for t in rows],
+            }
+        except Exception as e:
+            return {"success": False, "message": str(e), "transactions": []}
         finally:
             db.close()
 
@@ -451,9 +760,13 @@ class TransactionService:
                 }
 
             # Update allowed fields
-            allowed_fields = ['amount', 'category', 'merchant', 'notes']
+            allowed_fields = ['amount', 'category', 'merchant', 'notes', 'timestamp']
             for field, value in kwargs.items():
-                if field in allowed_fields and hasattr(transaction, field):
+                if field in allowed_fields and value is not None and hasattr(transaction, field):
+                    if field == 'category' and isinstance(value, str):
+                        value = value.lower().strip()
+                    if field == 'amount':
+                        value = float(value)
                     setattr(transaction, field, value)
 
             transaction.updated_at = datetime.utcnow()
