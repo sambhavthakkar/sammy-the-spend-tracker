@@ -366,14 +366,27 @@ def handle_budget_snapshot(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]
 
 
 def handle_list_pockets(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    return {"ok": True, "pockets": PocketService.get_user_pockets(user_id)}
+    # Always recompute from this user's transactions
+    return {"ok": True, "pockets": PocketService.get_user_pockets(user_id, recompute=True)}
+
+
+def handle_get_pocket(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    name = (args.get("name") or args.get("pocket") or "").strip()
+    if not name:
+        return {"ok": False, "error": "pocket name required"}
+    pocket = PocketService.get_pocket_by_name(user_id, name)
+    if not pocket:
+        return {"ok": False, "error": f"No pocket named {name}", "pockets": PocketService.get_user_pockets(user_id)}
+    return {"ok": True, "pocket": pocket}
 
 
 def handle_create_or_update_pocket(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    name = (args.get("name") or "").strip()
+    name = (args.get("name") or args.get("pocket") or "").strip()
     if not name:
         return {"ok": False, "error": "name required"}
-    limit = float(args.get("monthly_limit") or 0)
+    if args.get("monthly_limit") is None and args.get("limit") is None and args.get("budget") is None:
+        return {"ok": False, "error": "monthly_limit required"}
+    limit = float(args.get("monthly_limit") or args.get("limit") or args.get("budget") or 0)
     return PocketService.upsert_pocket(user_id, name, limit)
 
 
@@ -626,20 +639,46 @@ def get_default_registry() -> ToolRegistry:
         ),
         ToolSpec(
             name="list_pockets",
-            description="List budget pockets and remaining amounts.",
+            description=(
+                "List THIS user's budget pockets with limit, spent_mtd, remaining. "
+                "Always call this (or get_pocket) before answering any 'how much left' question. "
+                "Never invent remaining amounts."
+            ),
             parameters={"type": "object", "properties": {}},
             handler=handle_list_pockets,
         ),
         ToolSpec(
-            name="create_or_update_pocket",
-            description="Create a budget pocket with a monthly limit.",
+            name="get_pocket",
+            description=(
+                "Get one pocket's authoritative status for THIS user (limit, spent, remaining). "
+                "Use for 'how much food budget left'."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "monthly_limit": {"type": "number"},
+                    "pocket": {"type": "string"},
                 },
-                "required": ["name", "monthly_limit"],
+            },
+            handler=handle_get_pocket,
+        ),
+        ToolSpec(
+            name="create_or_update_pocket",
+            description=(
+                "Create or update THIS user's pocket monthly limit. "
+                "Example: 'my food budget is 2000' → name=Food, monthly_limit=2000. "
+                "Returns updated remaining after save."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "pocket": {"type": "string"},
+                    "monthly_limit": {"type": "number"},
+                    "limit": {"type": "number"},
+                    "budget": {"type": "number"},
+                },
+                "required": ["name"],
             },
             handler=handle_create_or_update_pocket,
         ),

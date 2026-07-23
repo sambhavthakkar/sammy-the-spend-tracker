@@ -311,8 +311,105 @@ class PocketService:
             db.close()
 
     @staticmethod
-    def get_user_pockets(user_id: str) -> List[Dict[str, Any]]:
-        """Get all pockets for a user"""
+    def recompute_pocket_spending(user_id: str) -> Dict[str, Any]:
+        """
+        Rebuild each pocket's spent_mtd from THIS user's transactions (current month).
+
+        Source of truth = transactions table, not stale spent_mtd counters.
+        Expense increases spent; income against that category decreases spent.
+        """
+        from calendar import monthrange
+        from sqlalchemy import func, or_
+
+        db = get_db()
+        try:
+            now = datetime.now()
+            period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            last = monthrange(now.year, now.month)[1]
+            period_end = now.replace(day=last, hour=23, minute=59, second=59, microsecond=999999)
+
+            pockets = db.query(Pocket).filter(Pocket.user_id == user_id).all()
+            if not pockets:
+                return {"success": True, "pockets": []}
+
+            # Map lower name -> pocket
+            by_name = {p.name.lower(): p for p in pockets}
+            for p in pockets:
+                p.spent_mtd = 0.0
+
+            txns = (
+                db.query(Transaction)
+                .filter(
+                    Transaction.user_id == user_id,
+                    Transaction.timestamp >= period_start,
+                    Transaction.timestamp <= period_end,
+                )
+                .all()
+            )
+
+            category_pocket_map = {
+                "food": ["food", "groceries", "dining", "restaurant"],
+                "transport": ["transport", "fuel", "commute", "travel", "uber", "ola"],
+                "shopping": ["shopping", "lifestyle", "clothes"],
+                "entertainment": ["entertainment", "fun", "movie"],
+                "utilities": ["utilities", "bills", "electricity", "internet", "recharge"],
+                "health": ["health", "medical", "medicine", "pharmacy"],
+                "education": ["education", "learning", "course"],
+                "other": ["other", "misc", "miscellaneous"],
+            }
+
+            def resolve_pocket(category: str):
+                cat = (category or "other").strip().lower()
+                if cat in by_name:
+                    return by_name[cat]
+                aliases = category_pocket_map.get(cat, [cat])
+                for p in pockets:
+                    pname = p.name.lower()
+                    if pname in aliases or any(a in pname or pname in a for a in aliases):
+                        return p
+                for p in pockets:
+                    if "other" in p.name.lower():
+                        return p
+                return pockets[0] if pockets else None
+
+            for t in txns:
+                pocket = resolve_pocket(t.category)
+                if not pocket:
+                    continue
+                direction = (getattr(t, "direction", None) or "expense").lower()
+                if direction == "income":
+                    pocket.spent_mtd -= float(t.amount or 0)
+                else:
+                    pocket.spent_mtd += float(t.amount or 0)
+
+            for p in pockets:
+                p.updated_at = datetime.utcnow()
+            db.commit()
+
+            return {
+                "success": True,
+                "pockets": [
+                    {
+                        "name": p.name,
+                        "monthly_limit": p.monthly_limit,
+                        "spent_mtd": p.spent_mtd,
+                        "remaining": p.monthly_limit - p.spent_mtd + (p.rollover_balance or 0),
+                    }
+                    for p in pockets
+                ],
+            }
+        except Exception as e:
+            db.rollback()
+            logger.error(f"recompute_pocket_spending: {e}")
+            return {"success": False, "message": str(e)}
+        finally:
+            db.close()
+
+    @staticmethod
+    def get_user_pockets(user_id: str, recompute: bool = True) -> List[Dict[str, Any]]:
+        """Get all pockets for a user (optionally recompute spent from transactions)."""
+        if recompute:
+            PocketService.recompute_pocket_spending(user_id)
         db = get_db()
         try:
             pockets = db.query(Pocket).filter(Pocket.user_id == user_id).all()
@@ -322,7 +419,7 @@ class PocketService:
                     "name": pocket.name,
                     "monthly_limit": pocket.monthly_limit,
                     "spent_mtd": pocket.spent_mtd,
-                    "remaining": pocket.monthly_limit - pocket.spent_mtd + pocket.rollover_balance,
+                    "remaining": pocket.monthly_limit - pocket.spent_mtd + (pocket.rollover_balance or 0),
                     "rollover_balance": pocket.rollover_balance,
                     "alert_pct": pocket.alert_pct,
                     "is_shared": pocket.is_shared,
@@ -336,16 +433,31 @@ class PocketService:
             db.close()
 
     @staticmethod
+    def get_pocket_by_name(user_id: str, name: str) -> Optional[Dict[str, Any]]:
+        """Authoritative single-pocket status (recomputed)."""
+        pockets = PocketService.get_user_pockets(user_id, recompute=True)
+        name_l = (name or "").strip().lower()
+        for p in pockets:
+            if p["name"].lower() == name_l:
+                return p
+        # partial match
+        for p in pockets:
+            if name_l in p["name"].lower() or p["name"].lower() in name_l:
+                return p
+        return None
+
+    @staticmethod
     def upsert_pocket(user_id: str, name: str, monthly_limit: float) -> Dict[str, Any]:
-        """Create pocket or update monthly limit if name already exists."""
+        """Create pocket or update monthly limit if name already exists (case-insensitive)."""
         db = get_db()
         try:
             user = db.query(User).filter(User.id == user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
+            name_clean = name.strip()
             pocket = (
                 db.query(Pocket)
-                .filter(Pocket.user_id == user_id, Pocket.name.ilike(name.strip()))
+                .filter(Pocket.user_id == user_id, Pocket.name.ilike(name_clean))
                 .first()
             )
             if pocket:
@@ -353,24 +465,42 @@ class PocketService:
                 pocket.updated_at = datetime.utcnow()
                 db.commit()
                 db.refresh(pocket)
-                return {
-                    "success": True,
-                    "message": "Pocket updated",
-                    "pocket_id": pocket.id,
-                    "pocket": {
-                        "id": pocket.id,
-                        "name": pocket.name,
-                        "monthly_limit": pocket.monthly_limit,
-                        "spent_mtd": pocket.spent_mtd,
-                        "remaining": pocket.monthly_limit - pocket.spent_mtd + (pocket.rollover_balance or 0),
-                    },
-                }
+                pocket_id = pocket.id
+                pocket_name = pocket.name
+            else:
+                pocket = Pocket(
+                    user_id=user_id,
+                    name=name_clean.title() if name_clean.islower() else name_clean,
+                    monthly_limit=float(monthly_limit),
+                    spent_mtd=0.0,
+                    rollover_balance=0.0,
+                )
+                db.add(pocket)
+                db.commit()
+                db.refresh(pocket)
+                pocket_id = pocket.id
+                pocket_name = pocket.name
         except Exception as e:
             db.rollback()
             return {"success": False, "message": str(e)}
         finally:
             db.close()
-        return PocketService.create_pocket(user_id, name.strip(), float(monthly_limit))
+
+        # Recompute spent so remaining is truthful for this user
+        PocketService.recompute_pocket_spending(user_id)
+        status = PocketService.get_pocket_by_name(user_id, pocket_name) or {}
+        return {
+            "success": True,
+            "message": "Pocket saved",
+            "pocket_id": pocket_id,
+            "pocket": {
+                "id": pocket_id,
+                "name": status.get("name") or pocket_name,
+                "monthly_limit": status.get("monthly_limit", monthly_limit),
+                "spent_mtd": status.get("spent_mtd", 0),
+                "remaining": status.get("remaining"),
+            },
+        }
 
     @staticmethod
     def update_pocket_spending(pocket_id: str, amount: float) -> Dict[str, Any]:
@@ -654,22 +784,33 @@ class TransactionService:
 
             db.commit()
             db.refresh(transaction)
+            txn_dict = TransactionService._txn_to_dict(transaction)
             logger.info(
                 f"Structured {direction} {transaction.id} user={user_id} amount={amount}"
             )
-            return {
-                "success": True,
-                "message": f"{direction.title()} logged successfully",
-                "transaction_id": transaction.id,
-                "transaction": TransactionService._txn_to_dict(transaction),
-                "pocket_update": pocket_update_result,
-            }
         except Exception as e:
             db.rollback()
             logger.error(f"Error log_expense_structured: {e}")
             return {"success": False, "message": str(e)}
         finally:
             db.close()
+
+        # Always recompute THIS user's pockets from transactions (authoritative remaining)
+        try:
+            PocketService.recompute_pocket_spending(user_id)
+            pocket_status = PocketService.get_pocket_by_name(user_id, category)
+        except Exception as e:
+            logger.warning(f"pocket recompute after log: {e}")
+            pocket_status = None
+
+        return {
+            "success": True,
+            "message": f"{direction.title()} logged successfully",
+            "transaction_id": txn_dict["id"],
+            "transaction": txn_dict,
+            "pocket_update": pocket_update_result,
+            "pocket_status": pocket_status,
+        }
 
     @staticmethod
     def get_user_transactions(

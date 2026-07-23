@@ -18,7 +18,9 @@ class Config:
     SECRET_KEY: str = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 
     # Database settings
-    DATABASE_URL: str = os.getenv('DATABASE_URL', 'sqlite:///budgetbot.db')
+    # Prefer absolute sqlite path so cwd changes don't split data across files
+    _default_db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'budgetbot.db')
+    DATABASE_URL: str = os.getenv('DATABASE_URL', f'sqlite:///{_default_db}')
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     SQLALCHEMY_ECHO: bool = os.getenv('SQLALCHEMY_ECHO', 'False').lower() == 'true'
 

@@ -53,6 +53,16 @@ class AgentRuntime:
 
     def _run_native_tools(self, messages: List[ChatMessage], user_id: str) -> str:
         tools = self.registry.schemas()
+        any_success_write = False
+        write_tools = {
+            "log_expense",
+            "log_income",
+            "log_money",
+            "create_or_update_pocket",
+            "update_transaction",
+            "delete_transaction",
+            "set_income",
+        }
         for round_i in range(self.max_rounds):
             try:
                 response = self.llm.chat(messages, tools=tools, tool_choice="auto")
@@ -71,6 +81,10 @@ class AgentRuntime:
                 )
                 for call in response.tool_calls:
                     result = self.registry.execute(call.name, call.arguments, user_id=user_id)
+                    if call.name in write_tools and (
+                        result.get("success") or result.get("ok")
+                    ) and not result.get("needs_confirmation"):
+                        any_success_write = True
                     # Surface ask_user immediately
                     if result.get("ask") and result.get("question"):
                         return str(result["question"])
@@ -86,9 +100,15 @@ class AgentRuntime:
                     )
                 continue
 
-            # Final text
+            # Final text — guard against false "Logged" claims without tools
             text = (response.content or "").strip()
             if text:
+                if _looks_like_false_success(text) and not any_success_write:
+                    logger.warning("Blocked hallucinated success reply without tool write")
+                    return (
+                        "I couldn't save that to your ledger yet. "
+                        "Please try again, e.g. `chips 150` or `food budget 2000`."
+                    )
                 return text
             return "Done."
 
@@ -167,6 +187,22 @@ class AgentRuntime:
                 "You can still try a simple expense like `lunch 250`, or try again in a moment."
             )
         return "I'm having trouble reaching the AI right now. Please try again shortly."
+
+
+def _looks_like_false_success(text: str) -> bool:
+    """Detect replies that claim a write without a successful write tool."""
+    import re
+
+    patterns = [
+        r"\blogged\b",
+        r"\bupdated\b.*\bbudget\b",
+        r"\bbudget\b.*\b(?:is now|updated|set)\b",
+        r"\bdeleted\b",
+        r"\breceived\b.*₹",
+        r"\bsaved\b.*₹",
+    ]
+    t = text.lower()
+    return any(re.search(p, t, re.I) for p in patterns)
 
 
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
