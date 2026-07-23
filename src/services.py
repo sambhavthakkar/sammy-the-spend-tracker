@@ -1214,14 +1214,25 @@ class BudgetService:
                 )\
                 .all()
 
-            total_spent = sum(t.amount for t in transactions)
+            total_spent = sum(
+                t.amount
+                for t in transactions
+                if (getattr(t, "direction", None) or "expense") == "expense"
+            )
+            total_received = sum(
+                t.amount
+                for t in transactions
+                if getattr(t, "direction", None) == "income"
+            )
 
             # Get committed spending
             committed_result = CommitmentService.get_committed_spending(user_id)
             total_committed = committed_result["total_monthly"]
 
-            # Calculate available to spend
-            available_to_spend = max(0, user.income - total_committed - total_spent)
+            # Calculate available to spend (monthly profile income + period received - outflows)
+            available_to_spend = max(
+                0, (user.income or 0) + total_received - total_committed - total_spent
+            )
 
             # Get pocket details
             pockets = db.query(Pocket).filter(Pocket.user_id == user_id).all()
