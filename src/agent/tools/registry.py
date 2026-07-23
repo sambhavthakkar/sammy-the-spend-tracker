@@ -141,11 +141,8 @@ def handle_log_expense(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_update_transaction(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    txn_id = args.get("transaction_id")
-    if not txn_id:
-        return {"ok": False, "error": "transaction_id required"}
-
-    # Allow short id prefix match
+    txn_id = args.get("transaction_id") or "last"
+    # Allow short id prefix match or "last"
     full_id = _resolve_transaction_id(user_id, str(txn_id))
     if not full_id:
         return {"ok": False, "error": "transaction not found"}
@@ -171,9 +168,7 @@ def handle_update_transaction(user_id: str, args: Dict[str, Any]) -> Dict[str, A
 
 
 def handle_delete_transaction(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    txn_id = args.get("transaction_id")
-    if not txn_id:
-        return {"ok": False, "error": "transaction_id required"}
+    txn_id = args.get("transaction_id") or "last"
     full_id = _resolve_transaction_id(user_id, str(txn_id))
     if not full_id:
         return {"ok": False, "error": "transaction not found"}
@@ -198,7 +193,13 @@ def handle_delete_transaction(user_id: str, args: Dict[str, Any]) -> Dict[str, A
 
 
 def _resolve_transaction_id(user_id: str, txn_id: str) -> Optional[str]:
+    """Resolve full id, short prefix, or aliases like 'last' / 'latest'."""
+    key = (txn_id or "").strip().lower()
     txns = TransactionService.get_user_transactions(user_id, limit=100)
+    if not txns:
+        return None
+    if key in ("last", "latest", "previous", "recent", "that", "it", "last_one", "last one"):
+        return txns[0]["id"]
     for t in txns:
         if t["id"] == txn_id or t["id"].startswith(txn_id):
             return t["id"]
@@ -266,18 +267,21 @@ def handle_create_or_update_pocket(user_id: str, args: Dict[str, Any]) -> Dict[s
     if not name:
         return {"ok": False, "error": "name required"}
     limit = float(args.get("monthly_limit") or 0)
-    pockets = PocketService.get_user_pockets(user_id)
-    existing = next((p for p in pockets if p["name"].lower() == name.lower()), None)
-    if existing:
-        # No dedicated update service — recreate guidance via create only if missing
-        # For MVP: create new if not exists; if exists report current
-        return {
-            "ok": True,
-            "message": "Pocket already exists",
-            "pocket": existing,
-            "note": "Limit update via create is not applied to existing pocket in MVP",
-        }
-    return PocketService.create_pocket(user_id, name, limit)
+    return PocketService.upsert_pocket(user_id, name, limit)
+
+
+def handle_top_expenses(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    from_date = args.get("from_date")
+    to_date = args.get("to_date")
+    if not from_date or not to_date:
+        return {"ok": False, "error": "from_date and to_date required (YYYY-MM-DD)"}
+    return TransactionService.top_expenses(
+        user_id,
+        from_date,
+        to_date,
+        limit=int(args.get("limit") or 5),
+        timezone=_user_tz(user_id),
+    )
 
 
 def handle_get_profile(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -326,33 +330,54 @@ def get_default_registry() -> ToolRegistry:
         ),
         ToolSpec(
             name="update_transaction",
-            description="Update an existing transaction by id (full or short prefix).",
+            description=(
+                "Update an existing transaction. Use transaction_id='last' for the most recent "
+                "expense, or a full/short id."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "transaction_id": {"type": "string"},
+                    "transaction_id": {
+                        "type": "string",
+                        "description": "Transaction id, short prefix, or 'last'",
+                    },
                     "amount": {"type": "number"},
                     "category": {"type": "string"},
                     "merchant": {"type": "string"},
                     "notes": {"type": "string"},
                     "date": {"type": "string"},
                 },
-                "required": ["transaction_id"],
             },
             handler=handle_update_transaction,
         ),
         ToolSpec(
             name="delete_transaction",
-            description="Delete a transaction by id.",
+            description="Delete a transaction. Use transaction_id='last' for the most recent expense.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "transaction_id": {"type": "string"},
+                    "transaction_id": {
+                        "type": "string",
+                        "description": "Transaction id, short prefix, or 'last'",
+                    },
                     "confirmed": {"type": "boolean"},
                 },
-                "required": ["transaction_id"],
             },
             handler=handle_delete_transaction,
+        ),
+        ToolSpec(
+            name="top_expenses",
+            description="List the largest expenses in an inclusive date range (YYYY-MM-DD).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "from_date": {"type": "string"},
+                    "to_date": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["from_date", "to_date"],
+            },
+            handler=handle_top_expenses,
         ),
         ToolSpec(
             name="list_recent_transactions",

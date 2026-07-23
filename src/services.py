@@ -28,6 +28,7 @@ class UserService:
                    mode: str = "personal") -> Dict[str, Any]:
         """Create a new user"""
         db = get_db()
+        user_id = None
         try:
             # Check if user already exists
             existing_user = db.query(User).filter(User.phone == phone).first()
@@ -48,26 +49,15 @@ class UserService:
                 name=name,
                 language=language,
                 mode=mode_enum,
-                income=0.0
+                income=0.0,
+                timezone=Config.AGENT_TIMEZONE_DEFAULT,
+                currency=Config.AGENT_CURRENCY_DEFAULT,
             )
             db.add(user)
             db.commit()
             db.refresh(user)
-
-            logger.info(f"Created new user: {user.id} ({user.name})")
-            return {
-                "success": True,
-                "message": "User created successfully",
-                "user_id": user.id,
-                "user": {
-                    "id": user.id,
-                    "phone": user.phone,
-                    "name": user.name,
-                    "language": user.language,
-                    "mode": user.mode.value,
-                    "income": user.income
-                }
-            }
+            user_id = user.id
+            logger.info(f"Created new user: {user_id} ({user.name})")
         except Exception as e:
             db.rollback()
             logger.error(f"Error creating user: {str(e)}")
@@ -77,6 +67,21 @@ class UserService:
             }
         finally:
             db.close()
+
+        if not user_id:
+            return {"success": False, "message": "Failed to create user"}
+
+        try:
+            PocketService.seed_default_pockets(user_id)
+        except Exception as e:
+            logger.warning(f"Default pockets seed failed for {user_id}: {e}")
+
+        return {
+            "success": True,
+            "message": "User created successfully",
+            "user_id": user_id,
+            "user": UserService.get_user(user_id),
+        }
 
     @staticmethod
     def get_user(user_id: str) -> Optional[Dict[str, Any]]:
@@ -152,14 +157,26 @@ class UserService:
             db.add(user)
             db.commit()
             db.refresh(user)
-            logger.info(f"Created Telegram user {user.id} telegram_id={telegram_id}")
-            return {"success": True, "created": True, "user": UserService._user_to_dict(user)}
+            user_dict = UserService._user_to_dict(user)
+            user_id = user.id
+            logger.info(f"Created Telegram user {user_id} telegram_id={telegram_id}")
         except Exception as e:
             db.rollback()
             logger.error(f"Error get_or_create_by_telegram: {e}")
             return {"success": False, "message": str(e)}
         finally:
             db.close()
+
+        # Only reached on successful create path if we didn't return earlier.
+        # Re-fetch: if early returns happened, we never get here with user_id set
+        # from create — handle carefully by checking locals.
+        if "user_id" in locals() and user_id:
+            try:
+                PocketService.seed_default_pockets(user_id)
+            except Exception as e:
+                logger.warning(f"Default pockets seed failed for {user_id}: {e}")
+            return {"success": True, "created": True, "user": UserService.get_user(user_id) or user_dict}
+        return {"success": False, "message": "Unexpected telegram user create state"}
 
     @staticmethod
     def update_profile(user_id: str, **fields) -> Dict[str, Any]:
@@ -218,6 +235,29 @@ class UserService:
 
 class PocketService:
     """Service for pocket-related operations"""
+
+    DEFAULT_POCKETS = (
+        ("Food", 8000.0),
+        ("Transport", 4000.0),
+        ("Shopping", 3000.0),
+        ("Utilities", 3000.0),
+        ("Entertainment", 2000.0),
+        ("Health", 2000.0),
+        ("Other", 3000.0),
+    )
+
+    @staticmethod
+    def seed_default_pockets(user_id: str) -> Dict[str, Any]:
+        """Create a starter set of budget pockets if the user has none."""
+        existing = PocketService.get_user_pockets(user_id)
+        if existing:
+            return {"success": True, "seeded": False, "count": len(existing)}
+        created = []
+        for name, limit in PocketService.DEFAULT_POCKETS:
+            result = PocketService.create_pocket(user_id, name, limit)
+            if result.get("success"):
+                created.append(name)
+        return {"success": True, "seeded": True, "pockets": created}
 
     @staticmethod
     def create_pocket(user_id: str, name: str, monthly_limit: float,
@@ -294,6 +334,43 @@ class PocketService:
             ]
         finally:
             db.close()
+
+    @staticmethod
+    def upsert_pocket(user_id: str, name: str, monthly_limit: float) -> Dict[str, Any]:
+        """Create pocket or update monthly limit if name already exists."""
+        db = get_db()
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return {"success": False, "message": "User not found"}
+            pocket = (
+                db.query(Pocket)
+                .filter(Pocket.user_id == user_id, Pocket.name.ilike(name.strip()))
+                .first()
+            )
+            if pocket:
+                pocket.monthly_limit = float(monthly_limit)
+                pocket.updated_at = datetime.utcnow()
+                db.commit()
+                db.refresh(pocket)
+                return {
+                    "success": True,
+                    "message": "Pocket updated",
+                    "pocket_id": pocket.id,
+                    "pocket": {
+                        "id": pocket.id,
+                        "name": pocket.name,
+                        "monthly_limit": pocket.monthly_limit,
+                        "spent_mtd": pocket.spent_mtd,
+                        "remaining": pocket.monthly_limit - pocket.spent_mtd + (pocket.rollover_balance or 0),
+                    },
+                }
+        except Exception as e:
+            db.rollback()
+            return {"success": False, "message": str(e)}
+        finally:
+            db.close()
+        return PocketService.create_pocket(user_id, name.strip(), float(monthly_limit))
 
     @staticmethod
     def update_pocket_spending(pocket_id: str, amount: float) -> Dict[str, Any]:
@@ -830,35 +907,43 @@ class TransactionService:
         """Update pocket spending based on category (internal method)"""
         db = get_db()
         try:
-            # Map categories to pocket names (simplified)
+            cat = (category or "other").strip().lower()
+            # category -> pocket name aliases
             category_pocket_map = {
-                'food': ['Food', 'Groceries', 'Dining'],
-                'transport': ['Transport', 'Fuel', 'Commute'],
-                'shopping': ['Shopping', 'Lifestyle'],
-                'entertainment': ['Entertainment', 'Fun'],
-                'utilities': ['Utilities', 'Bills'],
-                'health': ['Health', 'Medical'],
-                'education': ['Education', 'Learning']
+                "food": ["food", "groceries", "dining", "restaurant"],
+                "transport": ["transport", "fuel", "commute", "travel", "uber", "ola"],
+                "shopping": ["shopping", "lifestyle", "clothes"],
+                "entertainment": ["entertainment", "fun", "movie"],
+                "utilities": ["utilities", "bills", "electricity", "internet", "recharge"],
+                "health": ["health", "medical", "medicine", "pharmacy"],
+                "education": ["education", "learning", "course"],
+                "other": ["other", "misc", "miscellaneous"],
             }
 
-            # Find matching pocket
             target_pocket = None
             pockets = db.query(Pocket).filter(Pocket.user_id == user_id).all()
 
+            # 1) Exact pocket name == category
             for pocket in pockets:
-                pocket_keywords = category_pocket_map.get(pocket.name.lower(), [pocket.name.lower()])
-                if any(keyword in category.lower() for keyword in pocket_keywords):
+                if pocket.name.lower() == cat:
                     target_pocket = pocket
                     break
 
-            # If no specific match, look for 'Other' or similar
+            # 2) Category aliases contain pocket name or vice versa
             if not target_pocket:
+                aliases = [a.lower() for a in category_pocket_map.get(cat, [cat])]
                 for pocket in pockets:
-                    if 'other' in pocket.name.lower() or 'misc' in pocket.name.lower():
+                    pname = pocket.name.lower()
+                    if pname in aliases or any(a in pname or pname in a for a in aliases):
                         target_pocket = pocket
                         break
 
-            # If still no match, use first pocket
+            # 3) Other / first pocket
+            if not target_pocket:
+                for pocket in pockets:
+                    if "other" in pocket.name.lower() or "misc" in pocket.name.lower():
+                        target_pocket = pocket
+                        break
             if not target_pocket and pockets:
                 target_pocket = pockets[0]
 
@@ -873,7 +958,11 @@ class TransactionService:
                     "pocket_name": target_pocket.name,
                     "amount_added": amount,
                     "new_spent": target_pocket.spent_mtd,
-                    "remaining": target_pocket.monthly_limit - target_pocket.spent_mtd
+                    "remaining": (
+                        target_pocket.monthly_limit
+                        - target_pocket.spent_mtd
+                        + (target_pocket.rollover_balance or 0)
+                    ),
                 }
             else:
                 return {

@@ -16,7 +16,7 @@ from src.agent.session_store import SessionStore
 from src.config import Config
 from src.database import init_db
 from src.logging_config import get_logger
-from src.services import UserService
+from src.services import PocketService, UserService
 
 logger = get_logger(__name__)
 
@@ -69,32 +69,48 @@ def run_telegram_bot() -> None:
         )
         if not result.get("success"):
             return None
-        return result["user"]["id"]
+        user_id = result["user"]["id"]
+        # Existing users created before default pockets still get them once
+        try:
+            PocketService.seed_default_pockets(user_id)
+        except Exception as e:
+            logger.warning(f"pocket seed: {e}")
+        return user_id
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = await _ensure_user(update)
         if not user_id or not update.effective_message:
             return
         name = (update.effective_user.full_name if update.effective_user else "there")
+        pockets = PocketService.get_user_pockets(user_id)
+        pocket_line = ", ".join(p["name"] for p in pockets[:6]) if pockets else "none yet"
         await update.effective_message.reply_text(
-            f"Hi {name}! I'm BudgetBot.\n\n"
-            "Send anything naturally:\n"
+            f"Hi {name}! I'm BudgetBot — your personal finance agent.\n\n"
+            "Just type naturally (no special commands):\n"
             "• lunch 250\n"
+            "• uber 180 yesterday\n"
             "• how much did I spend this week?\n"
+            "• how much can I still spend?\n"
+            "• change last to transport\n"
+            "• delete last\n"
             "• set income to 80000\n\n"
-            "Voice notes work once STT is enabled (Phase 4)."
+            f"Starter pockets: {pocket_line}\n"
+            "Tip: set your monthly income so “how much left?” is meaningful."
         )
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_message:
             await update.effective_message.reply_text(
-                "Just chat. Examples:\n"
+                "Examples:\n"
                 "• coffee 120\n"
+                "• paid Mohit 500\n"
                 "• uber 300 yesterday\n"
                 "• food last week?\n"
+                "• biggest expenses this month\n"
                 "• how much can I still spend?\n"
                 "• change last to transport\n"
-                "• delete last"
+                "• delete last\n"
+                "• set food pocket to 10000"
             )
 
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
