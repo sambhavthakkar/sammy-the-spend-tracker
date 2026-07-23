@@ -12,9 +12,11 @@ PIP         := $(BIN)/pip
 export PYTHONPATH := .
 
 DATA_DIR    ?= personal_data
+TMUX_SESSION ?= budgetbot
 
 .PHONY: help venv install install-voice env data-init data-reset migrate \
-	agent telegram test clean docker-build docker-up docker-down docker-logs deploy stop status
+	agent telegram telegram-tmux telegram-attach test clean docker-build docker-up \
+	docker-down docker-logs deploy stop status
 
 help: ## Show this help
 	@echo "BudgetBot make targets"
@@ -23,7 +25,7 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Typical flow (keeps data):"
-	@echo "  make install env && make telegram"
+	@echo "  make install env && make telegram-tmux"
 	@echo ""
 	@echo "Private data lives in $(DATA_DIR). Back it up before using data-reset."
 
@@ -61,13 +63,20 @@ migrate: ## Dry-run migration from budgetbot.db; add APPLY=1 to write
 agent: ## Run conversational agent CLI
 	@$(PY) main.py agent
 
-telegram: ## Run Telegram bot without touching existing private data
-	@echo "Stopping any other local bot instances..."
-	@-pkill -f 'python main.py telegram' 2>/dev/null || true
-	@-pkill -f 'main.py telegram' 2>/dev/null || true
-	@sleep 1
+telegram: ## Run Telegram bot in the foreground
+	@$(MAKE) stop
 	@echo "Starting Telegram bot (Ctrl+C to stop). Only one process may poll this token."
-	@$(PY) main.py telegram
+	@$(PY) -u main.py telegram
+
+telegram-tmux: ## Start/restart Telegram bot in a detached tmux session
+	@command -v tmux >/dev/null || { echo "tmux is not installed"; exit 1; }
+	@$(MAKE) stop
+	@tmux new-session -d -s "$(TMUX_SESSION)" "cd '$(CURDIR)' && exec $(PY) -u main.py telegram"
+	@echo "Telegram running in tmux session: $(TMUX_SESSION)"
+	@echo "Attach with: make telegram-attach"
+
+telegram-attach: ## Attach to the Telegram tmux session
+	@tmux attach-session -t "$(TMUX_SESSION)"
 
 test: ## Run all current tests
 	@$(PY) -m pytest -q
@@ -81,9 +90,10 @@ print('allowlist entries:', len(Config.telegram_allowlist()), '(0 = allow all)')
 print('private data:', Config.PERSONAL_DATA_DIR); \
 print('voice:', Config.ENABLE_VOICE_PROCESSING, Config.STT_PROVIDER, Config.STT_MODEL)"
 
-stop: ## Stop a local Telegram process (best-effort)
-	@-pkill -f 'python main.py telegram' 2>/dev/null || true
-	@echo "Stopped matching local bot processes (if any)"
+stop: ## Stop the tmux session and any local Telegram worker
+	@-tmux kill-session -t "$(TMUX_SESSION)" 2>/dev/null || true
+	@-pkill -f '[p]ython.*[m]ain.py telegram' 2>/dev/null || true
+	@echo "Stopped Telegram worker (if any)"
 
 clean: ## Remove caches and logs (not .env)
 	@rm -rf __pycache__ src/**/__pycache__ tests/__pycache__ .pytest_cache
@@ -106,4 +116,4 @@ docker-logs: ## Tail Docker logs
 
 deploy: env install data-init ## Prepare a local private assistant without deleting data
 	@$(MAKE) status
-	@echo "Ready: make telegram or make agent"
+	@echo "Ready: make telegram-tmux or make agent"
