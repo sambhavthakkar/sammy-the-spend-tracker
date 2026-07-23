@@ -95,7 +95,8 @@ def run_telegram_bot() -> None:
             "• delete last\n"
             "• set income to 80000\n\n"
             f"Starter pockets: {pocket_line}\n"
-            "Tip: set your monthly income so “how much left?” is meaningful."
+            "Tip: set your monthly income so “how much left?” is meaningful.\n"
+            "Voice notes: say something like “lunch two hundred fifty”."
         )
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,7 +111,8 @@ def run_telegram_bot() -> None:
                 "• how much can I still spend?\n"
                 "• change last to transport\n"
                 "• delete last\n"
-                "• set food pocket to 10000"
+                "• set food pocket to 10000\n"
+                "• voice note: “spent 400 on petrol”"
             )
 
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -149,8 +151,8 @@ def run_telegram_bot() -> None:
 
         if not Config.ENABLE_VOICE_PROCESSING:
             await update.effective_message.reply_text(
-                "Voice is not enabled yet. Type the expense, or set "
-                "ENABLE_VOICE_PROCESSING=True and STT_PROVIDER once Phase 4 is ready."
+                "Voice is disabled. Set ENABLE_VOICE_PROCESSING=True in .env "
+                "(and install faster-whisper or configure STT_PROVIDER=openai)."
             )
             return
 
@@ -158,34 +160,52 @@ def run_telegram_bot() -> None:
         if not voice:
             return
 
-        await update.effective_message.chat.send_action("typing")
+        await update.effective_message.chat.send_action("record_voice")
         file = await context.bot.get_file(voice.file_id)
         import os
         from pathlib import Path
 
         os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+        # Telegram voice is typically OGG/Opus
         dest = Path(Config.UPLOAD_FOLDER) / "voice" / f"{user_id}_{update_id}.ogg"
         dest.parent.mkdir(parents=True, exist_ok=True)
         await file.download_to_drive(str(dest))
 
+        await update.effective_message.chat.send_action("typing")
         from src.media.stt import transcribe
 
-        transcript = await asyncio.to_thread(transcribe, dest)
         try:
-            dest.unlink(missing_ok=True)
-        except Exception:
-            pass
+            transcript = await asyncio.to_thread(transcribe, dest)
+        except Exception as e:
+            logger.error(f"STT error: {e}")
+            transcript = ""
+        finally:
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         if not transcript.strip():
             await update.effective_message.reply_text(
-                "I couldn't understand that voice note. Try again or type the amount."
+                "I couldn't understand that voice note. "
+                "Speak clearly with an amount (e.g. “lunch two hundred fifty”), "
+                "or type it instead.\n"
+                f"(STT provider: {Config.STT_PROVIDER})"
             )
             return
 
+        if Config.STT_SHOW_TRANSCRIPT:
+            # Short ack so user knows what we heard before the agent reply
+            heard = transcript if len(transcript) <= 200 else transcript[:200] + "…"
+            await update.effective_message.reply_text(f"Heard: {heard}")
+
+        await update.effective_message.chat.send_action("typing")
         result = await asyncio.to_thread(
             pipeline.handle_text, user_id, transcript, "voice"
         )
-        await update.effective_message.reply_text(result.text or "…")
+        reply = result.text or "…"
+        for i in range(0, len(reply), 3500):
+            await update.effective_message.reply_text(reply[i : i + 3500])
 
     app = (
         Application.builder()

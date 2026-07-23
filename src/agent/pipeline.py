@@ -70,7 +70,11 @@ class AgentPipeline:
         # Hint voice source to the model
         user_payload = text
         if source == "voice":
-            user_payload = f"[Voice note transcript]\n{text}"
+            user_payload = (
+                "[Voice note transcript — if this is an expense, call log_expense "
+                "with source=voice]\n"
+                f"{text}"
+            )
 
         try:
             reply = self.runtime.run(

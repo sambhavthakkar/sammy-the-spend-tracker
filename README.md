@@ -45,6 +45,22 @@ PYTHONPATH=. python main.py telegram
 
 Leave it running, then message your bot: `/start`, then `lunch 250`.
 
+### Voice notes
+
+Voice uses **local Whisper** by default (`faster-whisper`):
+
+```bash
+pip install faster-whisper
+# .env (defaults already enable voice):
+# ENABLE_VOICE_PROCESSING=True
+# STT_PROVIDER=auto
+# STT_MODEL=base
+```
+
+Send a Telegram voice note: *“lunch two hundred fifty”* → bot replies with transcript + logs expense.
+
+Alternative: OpenAI-compatible STT — set `STT_PROVIDER=openai`, `STT_BASE_URL`, `STT_API_KEY`, `STT_MODEL=whisper-1`.
+
 ### Other modes
 
 ```bash

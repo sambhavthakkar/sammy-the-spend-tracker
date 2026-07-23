@@ -63,9 +63,16 @@ class Config:
     AGENT_RECENT_TXNS: int = int(os.getenv('AGENT_RECENT_TXNS', '5'))
 
     # Voice / STT
-    STT_PROVIDER: str = os.getenv('STT_PROVIDER', 'none')  # ollama | none
-    STT_MODEL: str = os.getenv('STT_MODEL', 'whisper')
-    STT_LANGUAGE: str = os.getenv('STT_LANGUAGE', '')
+    # auto | faster_whisper | openai | none
+    STT_PROVIDER: str = os.getenv('STT_PROVIDER', 'auto')
+    # faster-whisper: tiny|base|small|…  openai: whisper-1
+    STT_MODEL: str = os.getenv('STT_MODEL', 'base')
+    STT_LANGUAGE: str = os.getenv('STT_LANGUAGE', '')  # empty = auto-detect
+    STT_DEVICE: str = os.getenv('STT_DEVICE', 'cpu')  # cpu | cuda
+    STT_BASE_URL: Optional[str] = os.getenv('STT_BASE_URL')  # OpenAI-compatible base
+    STT_API_KEY: Optional[str] = os.getenv('STT_API_KEY')
+    STT_TIMEOUT_SECONDS: int = int(os.getenv('STT_TIMEOUT_SECONDS', '120'))
+    STT_SHOW_TRANSCRIPT: bool = os.getenv('STT_SHOW_TRANSCRIPT', 'True').lower() == 'true'
 
     # OCR settings (stubbed for now)
     TESSERACT_PATH: Optional[str] = os.getenv('TESSERACT_PATH')
@@ -83,7 +90,7 @@ class Config:
     DATETIME_FORMAT: str = '%Y-%m-%d %H:%M:%S'
 
     # Feature flags
-    ENABLE_VOICE_PROCESSING: bool = os.getenv('ENABLE_VOICE_PROCESSING', 'False').lower() == 'true'
+    ENABLE_VOICE_PROCESSING: bool = os.getenv('ENABLE_VOICE_PROCESSING', 'True').lower() == 'true'
     ENABLE_OCR_PROCESSING: bool = os.getenv('ENABLE_OCR_PROCESSING', 'False').lower() == 'true'
     ENABLE_ANALYTICS: bool = os.getenv('ENABLE_ANALYTICS', 'True').lower() == 'true'
     ENABLE_AGENT: bool = os.getenv('ENABLE_AGENT', 'True').lower() == 'true'

@@ -12,7 +12,7 @@
 | 1 Core agent | Done | dates, services, tools, LLM client, runtime, pipeline, `python main.py agent` |
 | 2 Telegram text | Scaffolded | `python main.py telegram` + allowlist + dedupe |
 | 3 Confirmations | Partial | pending_actions + large-amount confirm in tools |
-| 4 Voice STT | Stub | `media/stt.py` placeholder |
+| 4 Voice STT | Done | `faster_whisper` + OpenAI-compatible HTTP; Telegram voice wired |
 | 5 Rich analytics | Partial | query_spending / breakdown / top_expenses services |
 | 6 Hardening | Pending | webhook secrets, rate limits, README rewrite |
 
