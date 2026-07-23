@@ -6,11 +6,16 @@ import argparse
 import os
 import re
 import sqlite3
+import sys
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import Config
 from src.personal_store import PersonalStore
@@ -115,6 +120,17 @@ def _profile(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _legacy_timestamp(value: Any) -> Any:
+    """Legacy defaults were UTC-naive; preserve that instant during migration."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"invalid legacy transaction timestamp: {value!r}") from None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
 def _transaction(row: sqlite3.Row, index: int, profile: dict[str, Any]) -> dict[str, Any]:
     source = re.sub(r"[^a-z0-9_-]+", "-", str(_value(row, "source", default="unknown")).casefold())[:32]
     legacy_id = str(_value(row, "id", "uuid", default=_value(row, "__legacy_rowid__", default=index)))
@@ -128,7 +144,7 @@ def _transaction(row: sqlite3.Row, index: int, profile: dict[str, Any]) -> dict[
         "amount": amount,
         "amount_minor": _minor(amount),
         "category": str(_value(row, "category", default="other") or "other"),
-        "occurred_at": _value(row, "timestamp", "occurred_at", "created_at"),
+        "occurred_at": _legacy_timestamp(_value(row, "timestamp", "occurred_at", "created_at")),
         "description": description,
         "currency": str(_value(row, "currency", default=profile["currency"]) or profile["currency"]),
         "source_ref": f"legacy:{source or 'unknown'}:transaction:{legacy_id}",
@@ -239,10 +255,20 @@ def migrate(
                 user_key = store.resolve_user(provider, external_id, profile["display_name"])
                 store.update_profile(user_key, profile)
                 for tx in txs:
-                    store.record_transaction(
+                    migrated = store.record_transaction(
                         user_key, tx["kind"], tx["amount"], tx["category"],
                         occurred_at=tx["occurred_at"], description=tx["description"],
                         source_ref=tx["source_ref"], currency=tx["currency"],
+                    )
+                    store.update_transaction(
+                        user_key,
+                        migrated["id"],
+                        kind=tx["kind"],
+                        amount=tx["amount"],
+                        category=tx["category"],
+                        occurred_at=tx["occurred_at"],
+                        description=tx["description"],
+                        currency=tx["currency"],
                     )
                 with sqlite3.connect(store.user_db_path(user_key)) as target:
                     for tx in txs:

@@ -1,5 +1,5 @@
-"""Conversational finance agent for BudgetBot."""
+"""Private conversational assistant."""
 
-from src.agent.pipeline import AgentPipeline
+from src.personal_agent import PersonalAgent
 
-__all__ = ["AgentPipeline"]
+__all__ = ["PersonalAgent"]

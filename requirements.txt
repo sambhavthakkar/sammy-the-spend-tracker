@@ -1,62 +1,7 @@
-# BudgetBot Production Requirements
-# Core web framework
-flask==2.3.3
-flask-sqlalchemy==3.0.5
-flask-migrate==4.0.5
-
-# Database
-psycopg2-binary==2.9.9
-sqlalchemy==2.0.23
-
-# Configuration
-python-dotenv==1.0.0
-
-# Logging
-python-json-logger==2.0.7
-
-# Validation
-pydantic==2.5.0
-email-validator==2.0.0
-
-# Async support (for future use)
-celery==5.3.4
-redis==4.6.0
-
-# API development
-marshmallow==3.20.1
-apispec==6.5.0
-
-# Testing
-pytest==7.4.3
-pytest-cov==4.1.0
-factory-boy==3.3.0
-
-# Development tools
-black==23.12.0
-flake8==6.1.0
-isort==5.12.0
-mypy==1.7.1
-
-# Utilities
-requests==2.31.0
-python-dateutil==2.8.2
+python-dotenv>=1.0.0
+python-json-logger>=2.0.0
 httpx>=0.27.0
-
-# Telegram bot (Phase 2)
 python-telegram-bot>=21.0
-
-# Voice STT (local Whisper — recommended for personal bot)
-faster-whisper>=1.0.0
-
-# Bill photo resize (optional but speeds up Gemma vision a lot)
 Pillow>=10.0.0
-
-# For production deployment
-gunicorn==21.2.0
-# gevent optional; omit if build fails on your platform
-# gevent==23.9.0
-
-# NOTE:
-# - Ollama Cloud via OpenAI-compatible HTTP (httpx)
-# - Voice STT provider wired in Phase 4
-# - OCR / Google Sheets / WhatsApp adapters later
+faster-whisper>=1.0.0
+pytest>=7.4.0

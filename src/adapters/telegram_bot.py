@@ -63,7 +63,11 @@ def _prepare_bill_confirmation(
                 payload["occurred_at"] = extraction.date
             except ValueError:
                 pass
-        store.set_pending_action(user_key, "record_transaction", payload)
+        store.set_pending_action(
+            user_key,
+            "confirmation",
+            {"tool": "record_transaction", "args": payload},
+        )
         reply = (
             f"I found {merchant}: {payload['currency'].upper()} {extraction.amount:g} "
             f"({payload['category']}). Record this expense? Reply yes or no."
@@ -81,6 +85,11 @@ def run_telegram_bot() -> None:
     if not token:
         raise SystemExit(
             "TELEGRAM_BOT_TOKEN is not set. Add it to .env and try again."
+        )
+    if not _allowed_ids():
+        raise SystemExit(
+            "TELEGRAM_ALLOWED_USER_IDS is required for this private bot. "
+            "Add your numeric Telegram user ID to .env."
         )
 
     try:
@@ -111,7 +120,7 @@ def run_telegram_bot() -> None:
         tid = str(user.id)
         # Reload allowlist every message so .env edits apply without restart
         allow = _allowed_ids()
-        if allow and tid not in allow:
+        if tid not in allow:
             if update.effective_message:
                 await update.effective_message.reply_text(
                     "Sorry, this bot is private."
@@ -154,7 +163,7 @@ def run_telegram_bot() -> None:
             return
 
         update_id = str(update.update_id)
-        if not store.mark_processed(user_id, "telegram", update_id):
+        if store.is_processed(user_id, "telegram", update_id):
             logger.info(f"Skipping duplicate update {update_id}")
             return
 
@@ -172,6 +181,7 @@ def run_telegram_bot() -> None:
         # Telegram message limit ~4096
         for i in range(0, len(reply), 3500):
             await update.effective_message.reply_text(reply[i : i + 3500])
+        store.mark_processed(user_id, "telegram", update_id)
 
     async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message:
@@ -181,7 +191,7 @@ def run_telegram_bot() -> None:
             return
 
         update_id = str(update.update_id)
-        if not store.mark_processed(user_id, "telegram", update_id):
+        if store.is_processed(user_id, "telegram", update_id):
             return
 
         if not Config.ENABLE_VOICE_PROCESSING:
@@ -189,10 +199,12 @@ def run_telegram_bot() -> None:
                 "Voice is disabled. Set ENABLE_VOICE_PROCESSING=True in .env "
                 "(and install faster-whisper or configure STT_PROVIDER=openai)."
             )
+            store.mark_processed(user_id, "telegram", update_id)
             return
 
         voice = update.effective_message.voice or update.effective_message.audio
         if not voice:
+            store.mark_processed(user_id, "telegram", update_id)
             return
 
         await update.effective_message.chat.send_action("record_voice")
@@ -225,6 +237,7 @@ def run_telegram_bot() -> None:
                 "or type it instead.\n"
                 f"(STT provider: {Config.STT_PROVIDER})"
             )
+            store.mark_processed(user_id, "telegram", update_id)
             return
 
         if Config.STT_SHOW_TRANSCRIPT:
@@ -243,6 +256,7 @@ def run_telegram_bot() -> None:
         reply = reply or "…"
         for i in range(0, len(reply), 3500):
             await update.effective_message.reply_text(reply[i : i + 3500])
+        store.mark_processed(user_id, "telegram", update_id)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Bill / receipt photo → Gemma vision → private pending action."""
@@ -253,13 +267,14 @@ def run_telegram_bot() -> None:
             return
 
         update_id = str(update.update_id)
-        if not store.mark_processed(user_id, "telegram", update_id):
+        if store.is_processed(user_id, "telegram", update_id):
             return
 
         if not Config.ENABLE_BILL_VISION:
             await update.effective_message.reply_text(
                 "Bill photos are disabled. Set ENABLE_BILL_VISION=True in .env."
             )
+            store.mark_processed(user_id, "telegram", update_id)
             return
 
         # Prefer highest resolution photo; also accept image documents
@@ -274,6 +289,7 @@ def run_telegram_bot() -> None:
             file_id = update.effective_message.document.file_id
             mime = update.effective_message.document.mime_type or "image/jpeg"
         else:
+            store.mark_processed(user_id, "telegram", update_id)
             return
 
         await update.effective_message.chat.send_action("upload_photo")
@@ -311,6 +327,7 @@ def run_telegram_bot() -> None:
 
         for i in range(0, len(reply), 3500):
             await update.effective_message.reply_text(reply[i : i + 3500])
+        store.mark_processed(user_id, "telegram", update_id)
 
     app = (
         Application.builder()

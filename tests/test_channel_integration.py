@@ -7,6 +7,7 @@ from src.adapters.telegram_bot import _prepare_bill_confirmation, _source_ref
 from src.agent.cli_agent import resolve_cli_user
 from src.config import Config
 from src.media.bill_vision import BillExtraction
+from src.personal_agent import PersonalAgent
 from src.personal_store import PersonalStore
 
 
@@ -51,12 +52,18 @@ class TestChannelIntegration(unittest.TestCase):
         )
 
         pending = self.store.get_pending_action(user_key)
-        self.assertEqual(pending["action_type"], "record_transaction")
-        self.assertEqual(pending["payload"]["source_ref"], source_ref)
-        self.assertEqual(pending["payload"]["description"], "Cafe — team lunch")
+        self.assertEqual(pending["action_type"], "confirmation")
+        self.assertEqual(pending["payload"]["tool"], "record_transaction")
+        args = pending["payload"]["args"]
+        self.assertEqual(args["source_ref"], source_ref)
+        self.assertEqual(args["description"], "Cafe — team lunch")
         self.assertEqual(self.store.find_transactions(user_key), [])
         self.assertIn("yes or no", reply)
-        self.assertEqual(len(self.store.recent_turns(user_key)), 2)
+
+        confirmation = PersonalAgent(self.store, llm=object()).chat(user_key, "yes")
+        self.assertIn("recorded", confirmation)
+        self.assertEqual(len(self.store.find_transactions(user_key)), 1)
+        self.assertIsNone(self.store.get_pending_action(user_key))
 
     def test_unreadable_bill_only_records_conversation(self):
         user_key = self.store.resolve_user("telegram", "42")

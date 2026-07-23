@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -122,6 +122,7 @@ class PersonalAgent:
         messages.append(ChatMessage("user", text))
         events: list[tuple[str, dict[str, Any], Any]] = []
         successful_writes: set[str] = set()
+        transaction_index = 0
 
         try:
             for _ in range(self.max_rounds):
@@ -129,7 +130,11 @@ class PersonalAgent:
                 if response.has_tool_calls:
                     messages.append(ChatMessage("assistant", response.content, tool_calls=response.tool_calls))
                     for call in response.tool_calls:
-                        result, event = self._execute(user_key, call, source_ref)
+                        call_source_ref = None
+                        if source_ref is not None and call.name == "record_transaction":
+                            transaction_index += 1
+                            call_source_ref = f"{source_ref}:{transaction_index}"
+                        result, event = self._execute(user_key, call, call_source_ref)
                         messages.append(ChatMessage("tool", _dumps(result), name=call.name, tool_call_id=call.id))
                         if event:
                             events.append(event)
@@ -143,9 +148,20 @@ class PersonalAgent:
                 self._persist(user_key, text, content, events)
                 return content
         except Exception:
+            if successful_writes:
+                content = self._completed_write_reply(events)
+                try:
+                    self._persist(user_key, text, content, events)
+                except Exception:
+                    pass
+                return content
             return _RETRY
 
-        content = "I couldn’t complete that safely. Please try again."
+        content = (
+            self._completed_write_reply(events)
+            if successful_writes
+            else "I couldn’t complete that safely. Please try again."
+        )
         self._persist(user_key, text, content, events)
         return content
 
@@ -162,7 +178,7 @@ class PersonalAgent:
         if unknown:
             return {"ok": False, "error": f"unsupported arguments: {', '.join(sorted(unknown))}"}, None
         if call.name == "record_transaction" and source_ref is not None:
-            args["source_ref"] = f"{source_ref}:{call.id}"
+            args["source_ref"] = source_ref
         if self._needs_confirmation(call.name, args):
             try:
                 self.store.set_pending_action(user_key, "confirmation", {"tool": call.name, "args": _safe(args)})
@@ -219,14 +235,14 @@ class PersonalAgent:
         if name not in {"record_transaction", "update_transaction"} or "amount" not in args:
             return False
         try:
-            amount = Decimal(str(args["amount"]))
+            amount = Decimal(str(args["amount"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             return amount.is_finite() and amount >= Decimal(str(Config.AGENT_CONFIRM_AMOUNT_THRESHOLD))
         except (InvalidOperation, ValueError):
             return False
 
     def _resolve_pending(self, user_key: str, text: str, pending: dict[str, Any], confirmed: bool) -> str:
-        self.store.clear_pending_action(user_key)
         if not confirmed:
+            self.store.clear_pending_action(user_key)
             answer = "Cancelled."
             self._persist(user_key, text, answer, [])
             return answer
@@ -235,17 +251,20 @@ class PersonalAgent:
             not isinstance(payload, dict) or set(payload) != {"tool", "args"}
             or payload.get("tool") not in _CONFIRM_TOOLS or not isinstance(payload.get("args"), dict)
         ):
+            self.store.clear_pending_action(user_key)
             answer = "I couldn’t verify that pending action, so I did not run it."
             self._persist(user_key, text, answer, [])
             return answer
         name, args = payload["tool"], payload["args"]
         allowed = _ALLOWED[name] | ({"source_ref"} if name == "record_transaction" else set())
         if set(args) - allowed:
+            self.store.clear_pending_action(user_key)
             answer = "I couldn’t verify that pending action, so I did not run it."
             self._persist(user_key, text, answer, [])
             return answer
         result, event = self._dispatch(user_key, name, args)
         if result["ok"]:
+            self.store.clear_pending_action(user_key)
             verb = {
                 "record_transaction": "recorded the transaction",
                 "update_transaction": "updated the transaction",
@@ -255,7 +274,7 @@ class PersonalAgent:
             answer = f"Confirmed — {verb}."
             self._persist(user_key, text, answer, [event] if event else [])
             return answer
-        answer = f"I couldn’t complete that action: {result['error']}"
+        answer = f"I couldn’t complete that action: {result['error']}. The confirmation is still pending."
         self._persist(user_key, text, answer, [])
         return answer
 
@@ -272,11 +291,28 @@ class PersonalAgent:
         self.store.append_turn(user_key, "assistant", assistant_text)
 
     @staticmethod
+    def _completed_write_reply(events: list[tuple[str, dict[str, Any], Any]]) -> str:
+        name = next((event[0] for event in reversed(events) if event[0] in _WRITE_TOOLS), "")
+        return {
+            "record_transaction": "The transaction was recorded, but I couldn’t finish the explanation.",
+            "update_transaction": "The transaction was updated, but I couldn’t finish the explanation.",
+            "delete_transaction": "The transaction was deleted, but I couldn’t finish the explanation.",
+            "set_category_limit": "The category limit was set, but I couldn’t finish the explanation.",
+            "remember": "I saved that memory, but I couldn’t finish the explanation.",
+            "forget_memory": "I forgot that memory, but I couldn’t finish the explanation.",
+            "update_profile": "Your profile was updated, but I couldn’t finish the explanation.",
+        }.get(name, "The requested change completed, but I couldn’t finish the explanation.")
+
+    @staticmethod
     def _block_false_write_claim(content: str, writes: set[str]) -> str:
         checks = (
             (r"\b(?:i(?:['’]ve| have)?|we(?:['’]ve| have)?|successfully|done[,!: -]*)\s*(?:recorded|logged)\b|\b(?:recorded|logged)\s+(?:it|that|this|successfully|your (?:expense|income|transaction)|the (?:expense|income|transaction))\b|\b(?:expense|income|transaction)\s+(?:(?:is|was|has been)\s+)?(?:recorded|logged)\b|\b(?:recorded|logged)[.!]", {"record_transaction"}),
             (r"\b(?:i(?:['’]ve| have)?|we(?:['’]ve| have)?|successfully|done[,!: -]*)\s*updated\b|\bupdated\s+(?:it|that|this|successfully|your (?:profile|transaction)|the transaction)\b|\btransaction\s+(?:(?:is|was|has been)\s+)?updated\b|\bupdated[.!]", {"update_transaction", "update_profile"}),
             (r"\b(?:i(?:['’]ve| have)?|we(?:['’]ve| have)?|successfully|done[,!: -]*)\s*deleted\b|\bdeleted\s+(?:it|that|this|successfully|your transaction|the transaction)\b|\btransaction\s+(?:(?:is|was|has been)\s+)?deleted\b|\bdeleted[.!]", {"delete_transaction"}),
+            (r"\b(?:i(?:['’]ll| will)?\s+)?remembered\b|\bi(?:['’]ll| will) remember that\b|\bsaved (?:that|this) (?:memory|preference|goal|event|fact)\b", {"remember"}),
+            (r"\b(?:i(?:['’]ve| have)?\s+)?forgot(?:ten)?\b", {"forget_memory"}),
+            (r"\b(?:set|updated|changed) (?:your |the )?(?:category )?(?:budget|limit)\b", {"set_category_limit"}),
+            (r"\b(?:updated|changed|set) (?:your )?(?:profile|timezone|currency|display name)\b", {"update_profile"}),
         )
         lowered = re.sub(
             r"\b(?:not|never|didn['’]t|couldn['’]t|wasn['’]t|isn['’]t|haven['’]t|hasn['’]t)\b[^.!?]{0,40}\b(?:recorded|logged|updated|deleted)\b",

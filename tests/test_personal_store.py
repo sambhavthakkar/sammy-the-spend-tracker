@@ -70,6 +70,10 @@ class TestPersonalStore(unittest.TestCase):
         self.assertEqual(first["id"], duplicate["id"])
         self.assertEqual(first["amount"], Decimal("0.1"))
         self.assertEqual(self.store.spending_summary(self.alice)["total"], Decimal("0.1"))
+        with self.assertRaises(ValueError):
+            self.store.record_transaction(self.alice, "expense", "1", "food", currency="USD")
+        with self.assertRaises(ValueError):
+            self.store.update_profile(self.alice, currency="USD")
         with sqlite3.connect(self.store.user_db_path(self.alice)) as db:
             self.assertEqual(db.execute("SELECT amount_minor, COUNT(*) FROM transactions").fetchone(), (10, 1))
             self.assertEqual(db.execute("SELECT typeof(amount_minor) FROM transactions").fetchone()[0], "integer")
@@ -139,12 +143,22 @@ class TestPersonalStore(unittest.TestCase):
         self.assertNotIn(replacement["id"], {row["id"] for row in self.store.search_memories(self.alice)})
         with self.assertRaises(ValueError):
             self.store.remember(self.alice, "fact", "My PIN is 1234")
+        with self.assertRaises(ValueError):
+            self.store.remember(self.alice, "fact", "Bearer token sk-live-abcdefghijklmnop")
+
+        self.store.append_turn(self.alice, "user", "My recovery code is ABCD-EFGH")
+        self.assertEqual(
+            self.store.recent_turns(self.alice)[-1]["content"],
+            "[sensitive content not stored]",
+        )
 
     def test_pending_turns_and_message_dedupe(self):
         self.store.append_turn(self.alice, "user", "hello")
         self.store.append_turn(self.alice, "assistant", "hi", tool_payload={"ok": True})
         self.assertEqual([row["content"] for row in self.store.recent_turns(self.alice)], ["hello", "hi"])
+        self.assertFalse(self.store.is_processed(self.alice, "telegram", "update-1"))
         self.assertTrue(self.store.mark_processed(self.alice, "telegram", "update-1"))
+        self.assertTrue(self.store.is_processed(self.alice, "telegram", "update-1"))
         self.assertFalse(self.store.mark_processed(self.alice, "telegram", "update-1"))
 
         action_id = self.store.set_pending_action(self.alice, "delete", {"transaction_id": "x"}, ttl_minutes=5)

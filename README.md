@@ -1,119 +1,93 @@
 # BudgetBot
 
-Conversational personal finance agent. Chat in natural language (Telegram or CLI); the model uses **tools** so balances and spends always come from your database — never invented.
+A private AI assistant that chats normally, remembers personal context, and manages spending when relevant.
 
-**Stack:** Python · SQLAlchemy · Ollama Cloud (default **Gemma 4**) · Telegram
+## What changed
 
-## Features
-
-- Log expenses from free text (`lunch 250`, `uber 180 yesterday`)
-- Ask date-scoped questions (`food last week?`, `how much today?`)
-- Budget snapshot & pockets (starter pockets on first use)
-- Fix / delete last expense conversationally
-- Telegram bot + local agent CLI
-- Rule-parser fallback if the LLM is unreachable
+- Normal conversation is the default; finance is not a forced workflow.
+- Every identity gets a physically separate SQLite database under `personal_data/users/`.
+- The central `registry.sqlite3` stores only provider identity → opaque user UUID routing.
+- Flexible timestamped memories cover facts, events, preferences, and goals.
+- Exact spending, balances, category limits, refunds, and largest purchases come from deterministic tools—not model guesses.
+- Sensitive writes use confirmation and the model never receives user IDs, paths, SQL, or another user's context.
 
 ## Quick start
 
 ```bash
-# Setup
-python3 -m venv .venv
-source .venv/bin/activate
+python -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
-# On Python 3.14, install what works if pins fail:
-# pip install sqlalchemy python-dotenv httpx flask python-telegram-bot pytest python-json-logger
-
 cp .env.example .env
-# Edit .env — minimum:
-#   OLLAMA_API_KEY=...
-#   OLLAMA_MODEL=gemma4:31b-cloud
-#   TELEGRAM_BOT_TOKEN=...          # for Telegram
-#   TELEGRAM_ALLOWED_USER_IDS=...   # your Telegram numeric id
+# Add OLLAMA_API_KEY; add TELEGRAM_BOT_TOKEN for Telegram.
+python main.py agent
 ```
 
-### Agent CLI
-
-```bash
-PYTHONPATH=. python main.py agent
-```
+The CLI identity is stable through `AGENT_CLI_USER_ID`, so conversations survive restarts.
 
 ### Telegram
 
 ```bash
-PYTHONPATH=. python main.py telegram
+python main.py telegram
 ```
 
-Leave it running, then message your bot: `/start`, then `lunch 250`.
+Set `TELEGRAM_ALLOWED_USER_IDS` in `.env`; the bot refuses to start without an allowlist. Text, voice notes, and bill photos all use the same private user database.
 
-### Voice notes
+## Example conversations
 
-Voice uses **local Whisper** by default (`faster-whisper`):
+- “How was your day?”
+- “Remember that I prefer quiet restaurants.”
+- “My goal is to save ₹20,000 for a laptop.”
+- “My monthly pocket money is ₹5,000.”
+- “I received ₹5,000 pocket money today.”
+- “Food should stay under ₹3,000 this month.”
+- “What was my largest food expense?”
+
+An expected monthly allowance is remembered; money is added to the ledger only when the user says it was actually received.
+
+## Private data layout
+
+```text
+personal_data/
+├── registry.sqlite3
+└── users/
+    ├── <opaque-user-uuid>.sqlite3
+    └── <another-user-uuid>.sqlite3
+```
+
+Each user database contains only that user's profile, transactions, category limits, memories, conversation turns, pending confirmations, and message dedupe records. Files are created with private permissions where the OS supports them.
+
+Back up the entire `personal_data/` directory. Filesystem separation is not encryption against someone who controls the host.
+
+## Migrating the old shared database
+
+Dry run first:
 
 ```bash
-pip install faster-whisper
-# ENABLE_VOICE_PROCESSING=True
-# STT_PROVIDER=auto
-# STT_MODEL=base
+python scripts/migrate_per_user.py --source budgetbot.db
 ```
 
-Send a Telegram voice note: *“lunch two hundred fifty”*.
-
-### Bill / receipt photos (Gemma vision)
-
-Send a clear **photo** of a bill, receipt, or UPI screenshot.  
-Uses your **same Ollama Gemma model** (vision) — no Tesseract/OCR service.
+Apply after the report looks correct:
 
 ```bash
-# .env
-ENABLE_BILL_VISION=True
-OLLAMA_MODEL=gemma4:31b-cloud
+python scripts/migrate_per_user.py --source budgetbot.db --apply
 ```
 
-Bot replies with what it saw; low confidence → asks **yes/no** before logging.
-
-### Other modes
-
-```bash
-PYTHONPATH=. python main.py cli   # legacy command CLI
-PYTHONPATH=. python main.py api   # Flask REST API
-```
-
-## How it works
-
-```
-You (Telegram / CLI)
-    → Agent (Gemma 4 via Ollama)
-    → Tools (log / query / budget / pockets)
-    → SQLite/Postgres ledger
-    → Natural language reply grounded in tool results
-```
-
-Money truth lives in the DB. The model only interprets language and calls tools.
-
-## Project layout
-
-```
-src/
-  agent/          # pipeline, runtime, tools, prompts
-  adapters/       # Telegram bot
-  llm/            # Ollama OpenAI-compatible client
-  timeutils/      # date periods (week starts Monday)
-  services.py     # business logic
-  database.py     # SQLAlchemy models
-docs/
-  conversational-agent-plan.md
-```
+The migration never changes or deletes `budgetbot.db`, verifies per-user counts and signed totals, and is safe to rerun.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. python -m pytest tests/test_dates.py tests/test_tools_and_services.py -q
+python -m pytest -q
 ```
 
-## Docs
+The focused checks cover physical user isolation, money precision, category limits, temporal memory, tool confirmations, normal chat, channel wiring, and migration idempotency.
 
-See [docs/conversational-agent-plan.md](docs/conversational-agent-plan.md) for full architecture and phases (voice STT next, etc.).
+## Docker
 
-## Privacy
+```bash
+docker compose up -d --build
+```
 
-`.env` is gitignored. Ollama Cloud receives message text for inference; your ledger stays in your database.
+The Compose volume persists `/app/personal_data`; no Postgres, Redis, graph database, or vector database is required.
+
+See [`docs/conversational-agent-plan.md`](docs/conversational-agent-plan.md) for the design boundaries.

@@ -22,7 +22,11 @@ PERIODS = {
     "last_month", "this_year", "all",
 }
 _SECRET_RE = re.compile(
-    r"(?i)\b(?:password|passwd|pwd|pin|access[_ -]?token|api[_ -]?key|cvv)\b"
+    r"(?i)\b(?:password|passwd|pwd|pin|secret|cvv|recovery[_ -]?code|backup[_ -]?code|"
+    r"seed[_ -]?phrase|private[_ -]?key|bearer[_ -]?token|access[_ -]?token|refresh[_ -]?token|"
+    r"api[_ -]?key|auth[_ -]?token|client[_ -]?secret)\b"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\b(?:sk-[A-Za-z0-9_-]{12,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,})\b"
     r"|\b(?:card|account|acct)(?:\s+number|\s+no\.?|\s*#)?\b.{0,12}\b\d[\d -]{6,}\d\b"
     r"|(?<!\d)\d(?:[ -]?\d){11,18}(?!\d)"
 )
@@ -49,7 +53,7 @@ def _minor(value: Any, *, allow_zero: bool = False) -> int:
     if not amount.is_finite() or amount < 0 or (not allow_zero and amount == 0):
         raise ValueError("amount must be positive")
     minor = int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    if minor < 0 or (not allow_zero and minor == 0) or minor > 9_000_000_000_000_000_000:
+    if minor < 0 or (not allow_zero and minor == 0) or minor > 9_000_000_000_000:
         raise ValueError("amount is outside the supported range")
     return minor
 
@@ -309,6 +313,10 @@ class PersonalStore:
             timezone_name = changes.get("timezone", current["timezone"])
             currency = str(changes.get("currency", current["currency"])).strip().upper()
             _timezone(timezone_name)
+            if currency != current["currency"] and db.execute(
+                "SELECT 1 FROM transactions WHERE deleted_at IS NULL LIMIT 1"
+            ).fetchone():
+                raise ValueError("currency cannot change after transactions exist")
             if display_name is not None and len(str(display_name)) > 200:
                 raise ValueError("display_name is too long")
             if len(currency) != 3 or not currency.isalpha():
@@ -327,12 +335,15 @@ class PersonalStore:
         if role not in {"user", "assistant", "tool", "system"}:
             raise ValueError("invalid conversation role")
         turn_id, stamp = str(uuid4()), _iso(_now())
+        content = str(content)
+        if _SECRET_RE.search(content):
+            content = "[sensitive content not stored]"
         payload = None if tool_payload is None else _json(tool_payload)
         with self._user_db(user_key) as db:
             db.execute(
                 """INSERT INTO conversation_turns
                    (id, role, content, tool_name, tool_payload, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
-                (turn_id, role, str(content), tool_name, payload, stamp),
+                (turn_id, role, content, tool_name, payload, stamp),
             )
         return turn_id
 
@@ -348,6 +359,13 @@ class PersonalStore:
             item["tool_payload"] = json.loads(item["tool_payload"]) if item["tool_payload"] else None
             result.append(item)
         return result
+
+    def is_processed(self, user_key: str, provider: str, external_id: str) -> bool:
+        with self._user_db(user_key) as db:
+            return db.execute(
+                "SELECT 1 FROM processed_messages WHERE provider = ? AND external_id = ?",
+                (str(provider), str(external_id)),
+            ).fetchone() is not None
 
     def mark_processed(self, user_key: str, provider: str, external_id: str) -> bool:
         with self._user_db(user_key) as db:
@@ -411,6 +429,8 @@ class PersonalStore:
             tx_currency = str(currency or profile["currency"]).upper()
             if len(tx_currency) != 3 or not tx_currency.isalpha():
                 raise ValueError("currency must be a three-letter code")
+            if tx_currency != profile["currency"]:
+                raise ValueError("transaction currency must match the user profile")
             db.execute(
                 """INSERT OR IGNORE INTO transactions
                    (id, kind, amount_minor, currency, category, description, occurred_at,
@@ -480,6 +500,9 @@ class PersonalStore:
             currency = str(changes.get("currency", row["currency"])).upper()
             if len(currency) != 3 or not currency.isalpha():
                 raise ValueError("currency must be a three-letter code")
+            profile_currency = db.execute("SELECT currency FROM profile WHERE id = 1").fetchone()["currency"]
+            if currency != profile_currency:
+                raise ValueError("transaction currency must match the user profile")
             db.execute(
                 """UPDATE transactions SET kind = ?, amount_minor = ?, currency = ?, category = ?,
                    description = ?, occurred_at = ?, source_ref = ?, updated_at = ? WHERE id = ?""",

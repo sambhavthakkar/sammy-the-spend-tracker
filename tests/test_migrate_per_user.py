@@ -80,6 +80,15 @@ class TestMigratePerUser(unittest.TestCase):
         self.assertEqual([report["source_count"] for report in reports], [2, 1])
         self.assertTrue(all("target(projected)" in message for message in messages))
 
+    def test_dry_run_rejects_invalid_timestamp_before_writing(self):
+        with sqlite3.connect(self.source) as db:
+            db.execute("UPDATE transactions SET timestamp = 'not-a-date' WHERE id = ?", (
+                "11111111-1111-1111-1111-111111111111",
+            ))
+        with self.assertRaises(ValueError):
+            migrate(self.source, self.data_dir, output=lambda _: None)
+        self.assertFalse(self.data_dir.exists())
+
     def test_apply_isolated_verified_and_idempotent(self):
         migrate(self.source, self.data_dir, apply=True, output=lambda _: None)
         store = PersonalStore(self.data_dir)
@@ -90,8 +99,11 @@ class TestMigratePerUser(unittest.TestCase):
 
         self.assertEqual(store.get_profile(alice)["display_name"], "Alice")
         self.assertEqual(store.get_profile(bob)["currency"], "USD")
-        self.assertEqual(len(store.find_transactions(alice)), 2)
+        alice_transactions = store.find_transactions(alice)
+        self.assertEqual(len(alice_transactions), 2)
         self.assertEqual(len(store.find_transactions(bob)), 1)
+        migrated_lunch = next(row for row in alice_transactions if row["category"] == "food")
+        self.assertEqual(migrated_lunch["occurred_at"], "2025-01-02T10:00:00.000000+00:00")
         self.assertEqual(store.money_balance(alice), Decimal("10.15"))
         self.assertEqual(store.money_balance(bob), Decimal("-3.33"))
         self.assertEqual(store.category_status(alice, "food", "all")["limit"], Decimal("100.55"))
@@ -120,6 +132,16 @@ class TestMigratePerUser(unittest.TestCase):
         self.assertEqual(len(store.find_transactions(bob)), 1)
         with sqlite3.connect(store.user_db_path(alice)) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM memories").fetchone()[0], 1)
+
+        with sqlite3.connect(self.source) as db:
+            db.execute(
+                "UPDATE transactions SET amount = 12.34, category = 'Groceries' WHERE id = ?",
+                ("11111111-1111-1111-1111-111111111111",),
+            )
+        migrate(self.source, self.data_dir, apply=True, output=lambda _: None)
+        changed = next(row for row in store.find_transactions(alice) if row["kind"] == "expense")
+        self.assertEqual(changed["amount"], Decimal("12.34"))
+        self.assertEqual(changed["category"], "groceries")
 
 
 if __name__ == "__main__":

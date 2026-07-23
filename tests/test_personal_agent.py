@@ -77,7 +77,7 @@ class TestPersonalAgent(unittest.TestCase):
         self.assertIn("12.34", answer)
         self.assertEqual(self.store.spending_summary(self.alice, "today")["total"], Decimal("12.34"))
         transaction = self.store.find_transactions(self.alice)[0]
-        self.assertEqual(transaction["source_ref"], "message-7:write-1")
+        self.assertEqual(transaction["source_ref"], "message-7:1")
         events = [row for row in self.store.recent_turns(self.alice) if row["role"] == "tool"]
         self.assertEqual([row["tool_name"] for row in events], ["record_transaction", "spending_summary"])
         self.assertEqual(events[1]["tool_payload"]["result"]["total"], "12.34")
@@ -101,6 +101,17 @@ class TestPersonalAgent(unittest.TestCase):
         self.assertEqual(len(self.store.find_transactions(self.alice)), 1)
         self.assertIsNone(self.store.get_pending_action(self.alice))
 
+    def test_rounded_threshold_requires_confirmation(self):
+        llm = ScriptedLLM(
+            ChatResponse(tool_calls=[ToolCall("round-1", "record_transaction", {
+                "kind": "expense", "amount": "9999.999", "category": "travel",
+            })]),
+            ChatResponse(content="Please confirm yes or no."),
+        )
+        answer = PersonalAgent(self.store, llm).chat(self.alice, "Record 9999.999 for travel")
+        self.assertIn("confirm", answer.lower())
+        self.assertEqual(self.store.find_transactions(self.alice), [])
+
     def test_delete_and_forget_always_require_confirmation(self):
         transaction = self.store.record_transaction(self.alice, "expense", "5", "food")
         memory = self.store.remember(self.alice, "fact", "Alice owns a bicycle")
@@ -123,15 +134,47 @@ class TestPersonalAgent(unittest.TestCase):
         self.assertEqual(self.store.search_memories(self.alice, "bicycle"), [])
 
     def test_false_success_without_tool_write_is_blocked(self):
-        llm = ScriptedLLM(ChatResponse(content="I’ve recorded that expense successfully."))
-        answer = PersonalAgent(self.store, llm).chat(self.alice, "I spent 8 on snacks")
+        llm = ScriptedLLM(
+            ChatResponse(content="I’ve recorded that expense successfully."),
+            ChatResponse(content="I remembered that preference."),
+        )
+        agent = PersonalAgent(self.store, llm)
+        answer = agent.chat(self.alice, "I spent 8 on snacks")
+        memory_answer = agent.chat(self.alice, "I prefer tea")
 
         self.assertIn("did not make it", answer)
+        self.assertIn("did not make it", memory_answer)
         self.assertEqual(self.store.find_transactions(self.alice), [])
+        self.assertEqual(self.store.search_memories(self.alice), [])
+
+    def test_successful_write_survives_final_llm_failure(self):
+        llm = ScriptedLLM(
+            ChatResponse(tool_calls=[ToolCall("write-1", "record_transaction", {
+                "kind": "expense", "amount": "7.50", "category": "food",
+            })]),
+            RuntimeError("offline after write"),
+        )
+        answer = PersonalAgent(self.store, llm).chat(
+            self.alice, "Record 7.50 for food", source_ref="message-9"
+        )
+
+        self.assertIn("was recorded", answer)
+        self.assertEqual(len(self.store.find_transactions(self.alice)), 1)
+        self.assertEqual(self.store.find_transactions(self.alice)[0]["source_ref"], "message-9:1")
+        self.assertEqual(self.store.recent_turns(self.alice)[-1]["content"], answer)
+
+    def test_failed_confirmed_action_stays_pending(self):
+        self.store.set_pending_action(self.alice, "confirmation", {
+            "tool": "record_transaction",
+            "args": {"kind": "expense", "amount": "invalid", "category": "food"},
+        })
+        answer = PersonalAgent(self.store, llm=object()).chat(self.alice, "yes")
+        self.assertIn("still pending", answer)
+        self.assertIsNotNone(self.store.get_pending_action(self.alice))
 
     def test_two_users_never_mix_context_or_turns(self):
         bob = self.store.resolve_user("test", "bob", "Bob")
-        self.store.remember(self.alice, "fact", "Alice has a secret blue bicycle")
+        self.store.remember(self.alice, "fact", "Alice has a blue bicycle")
         llm = ScriptedLLM(
             ChatResponse(content="Alice answer"), ChatResponse(content="Bob answer"),
         )

@@ -5,9 +5,8 @@ Provides structured logging with different levels and formatters
 import logging
 import os
 import sys
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-from pythonjsonlogger import jsonlogger
-from src.config import Config
+from logging.handlers import TimedRotatingFileHandler
+from pythonjsonlogger.json import JsonFormatter
 
 def setup_logger(name: str = 'budgetbot', level: int = logging.INFO) -> logging.Logger:
     """
@@ -28,7 +27,7 @@ def setup_logger(name: str = 'budgetbot', level: int = logging.INFO) -> logging.
         return logger
 
     # Create formatters
-    json_formatter = jsonlogger.JsonFormatter(
+    json_formatter = JsonFormatter(
         '%(timestamp)s %(level)s %(name)s %(message)s %(pathname)s %(lineno)d',
         rename_fields={'level': 'levelname', 'timestamp': '@timestamp'}
     )
