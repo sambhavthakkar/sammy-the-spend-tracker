@@ -4,6 +4,7 @@ OpenAI-compatible chat client for Ollama Cloud (or local Ollama /v1).
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -29,6 +30,10 @@ class OllamaClient:
         self.api_key = api_key if api_key is not None else Config.OLLAMA_API_KEY
         self.model = model or Config.OLLAMA_MODEL
         self.timeout = timeout if timeout is not None else float(Config.OLLAMA_TIMEOUT_SECONDS)
+        self._client = httpx.Client(timeout=self.timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -58,19 +63,22 @@ class OllamaClient:
         last_error: Optional[Exception] = None
         for attempt in range(2):
             try:
-                with httpx.Client(timeout=self.timeout) as client:
-                    resp = client.post(url, headers=self._headers(), json=payload)
-                if resp.status_code in (429, 500, 502, 503) and attempt == 0:
+                resp = self._client.post(url, headers=self._headers(), json=payload)
+                if resp.status_code in (408, 429, 500, 502, 503, 504) and attempt == 0:
                     logger.warning(f"LLM transient status {resp.status_code}, retrying")
+                    time.sleep(0.5)
                     continue
                 resp.raise_for_status()
-                data = resp.json()
-                return self._parse_response(data)
-            except Exception as e:
+                return self._parse_response(resp.json())
+            except httpx.TransportError as e:
                 last_error = e
                 if attempt == 0:
                     logger.warning(f"LLM request failed, retrying: {e}")
+                    time.sleep(0.5)
                     continue
+                break
+            except Exception as e:
+                last_error = e
                 break
 
         logger.error(f"LLM request failed: {last_error}")

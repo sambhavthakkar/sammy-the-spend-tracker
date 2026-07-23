@@ -15,7 +15,11 @@ from typing import Optional, Set
 
 from src.config import Config
 from src.logging_config import get_logger
-from src.media.bill_vision import BillExtraction, extract_bill_from_image
+from src.media.bill_vision import (
+    BillExtraction,
+    close_bill_vision_client,
+    extract_bill_from_image,
+)
 from src.personal_store import PersonalStore
 
 logger = get_logger(__name__)
@@ -28,6 +32,27 @@ def _allowed_ids() -> Set[str]:
 
 def _source_ref(update_id: object, source: str) -> str:
     return f"telegram:{update_id}:{source}"
+
+
+def _user_lock(locks: dict[str, asyncio.Lock], user_id: str) -> asyncio.Lock:
+    # ponytail: 200 users make retained locks harmless; prune if this grows to thousands.
+    lock = locks.get(user_id)
+    if lock is None:
+        lock = locks[user_id] = asyncio.Lock()
+    return lock
+
+
+async def _run_limited(limit: asyncio.Semaphore, func, /, *args, **kwargs):
+    async with limit:
+        work = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            try:
+                await work
+            except Exception:
+                pass
+            raise
 
 
 def _prepare_bill_confirmation(
@@ -112,6 +137,23 @@ def run_telegram_bot() -> None:
 
     store = PersonalStore()
     agent = PersonalAgent(store=store)
+    user_locks: dict[str, asyncio.Lock] = {}
+    llm_slots = asyncio.Semaphore(Config.OLLAMA_MAX_CONCURRENCY)
+    stt_slots = asyncio.Semaphore(Config.STT_MAX_CONCURRENCY)
+    vision_slots = asyncio.Semaphore(Config.BILL_VISION_MAX_CONCURRENCY)
+
+    def serialized(handler):
+        async def wrapper(update, context):
+            user = update.effective_user
+            if not user:
+                return await handler(update, context)
+            async with _user_lock(user_locks, str(user.id)):
+                return await handler(update, context)
+        return wrapper
+
+    async def _shutdown(_application) -> None:
+        agent.llm.close()
+        close_bill_vision_client()
 
     async def _ensure_user(update: Update) -> Optional[str]:
         user = update.effective_user
@@ -170,7 +212,8 @@ def run_telegram_bot() -> None:
         text = update.effective_message.text
         await update.effective_message.chat.send_action("typing")
 
-        reply = await asyncio.to_thread(
+        reply = await _run_limited(
+            llm_slots,
             agent.chat,
             user_id,
             text,
@@ -220,7 +263,7 @@ def run_telegram_bot() -> None:
         from src.media.stt import transcribe
 
         try:
-            transcript = await asyncio.to_thread(transcribe, dest)
+            transcript = await _run_limited(stt_slots, transcribe, dest)
         except Exception as e:
             logger.error(f"STT error: {e}")
             transcript = ""
@@ -246,7 +289,8 @@ def run_telegram_bot() -> None:
             await update.effective_message.reply_text(f"Heard: {heard}")
 
         await update.effective_message.chat.send_action("typing")
-        reply = await asyncio.to_thread(
+        reply = await _run_limited(
+            llm_slots,
             agent.chat,
             user_id,
             transcript,
@@ -305,7 +349,10 @@ def run_telegram_bot() -> None:
         await update.effective_message.chat.send_action("typing")
 
         try:
-            extraction = await asyncio.to_thread(extract_bill_from_image, dest, mime)
+            async with vision_slots:
+                extraction = await _run_limited(
+                    llm_slots, extract_bill_from_image, dest, mime
+                )
             reply = _prepare_bill_confirmation(
                 store,
                 user_id,
@@ -332,15 +379,17 @@ def run_telegram_bot() -> None:
     app = (
         Application.builder()
         .token(token)
+        .concurrent_updates(Config.TELEGRAM_CONCURRENT_UPDATES)
+        .post_shutdown(_shutdown)
         .build()
     )
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(CommandHandler("start", serialized(start_cmd)))
+    app.add_handler(CommandHandler("help", serialized(help_cmd)))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, serialized(on_text)))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, serialized(on_voice)))
+    app.add_handler(MessageHandler(filters.PHOTO, serialized(on_photo)))
     app.add_handler(
-        MessageHandler(filters.Document.IMAGE, on_photo)
+        MessageHandler(filters.Document.IMAGE, serialized(on_photo))
     )
 
     mode = (Config.TELEGRAM_MODE or "polling").lower()
@@ -352,13 +401,13 @@ def run_telegram_bot() -> None:
             port=int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443")),
             url_path=token,
             webhook_url=Config.TELEGRAM_WEBHOOK_URL,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
     else:
         # Only one process may poll this token
         app.run_polling(
             allowed_updates=["message"],
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
 
 

@@ -69,13 +69,9 @@ class TestBillVisionParse(unittest.TestCase):
             mock_resp.raise_for_status = MagicMock()
             mock_resp.json.return_value = body
 
-            with patch("src.media.bill_vision.httpx.Client") as client_cls:
-                client = MagicMock()
-                client.__enter__ = MagicMock(return_value=client)
-                client.__exit__ = MagicMock(return_value=False)
-                client.post.return_value = mock_resp
-                client_cls.return_value = client
-
+            client = MagicMock()
+            client.post.return_value = mock_resp
+            with patch("src.media.bill_vision._http_client", return_value=client):
                 ext = extract_bill_from_image(path, mime="image/jpeg")
                 self.assertTrue(ext.is_bill)
                 self.assertEqual(ext.amount, 450)

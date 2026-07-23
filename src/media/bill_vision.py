@@ -9,7 +9,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -19,6 +21,18 @@ from src.config import Config
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _http_client() -> httpx.Client:
+    return httpx.Client()
+
+
+def close_bill_vision_client() -> None:
+    if _http_client.cache_info().currsize:
+        _http_client().close()
+        _http_client.cache_clear()
+
 
 EXTRACT_PROMPT = """You are reading a photo of a bill, receipt, invoice, or payment screenshot for personal expense tracking in India (INR).
 
@@ -185,9 +199,11 @@ def extract_bill_from_image(
     content = ""
     for attempt in range(2):
         try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code in (429, 500, 502, 503) and attempt == 0:
+            resp = _http_client().post(
+                url, headers=headers, json=payload, timeout=timeout
+            )
+            if resp.status_code in (408, 429, 500, 502, 503, 504) and attempt == 0:
+                time.sleep(0.5)
                 continue
             resp.raise_for_status()
             body = resp.json()
@@ -198,7 +214,8 @@ def extract_bill_from_image(
         except Exception as e:
             last_err = e
             logger.warning(f"Bill vision attempt failed: {e}")
-            if attempt == 0:
+            if isinstance(e, httpx.TransportError) and attempt == 0:
+                time.sleep(0.5)
                 continue
             return BillExtraction(
                 is_bill=False,

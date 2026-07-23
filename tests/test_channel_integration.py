@@ -1,9 +1,17 @@
 """Focused tests for private CLI and bill channel wiring."""
+import asyncio
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
-from src.adapters.telegram_bot import _prepare_bill_confirmation, _source_ref
+from src.adapters.telegram_bot import (
+    _prepare_bill_confirmation,
+    _run_limited,
+    _source_ref,
+    _user_lock,
+)
 from src.agent.cli_agent import resolve_cli_user
 from src.config import Config
 from src.media.bill_vision import BillExtraction
@@ -79,6 +87,54 @@ class TestChannelIntegration(unittest.TestCase):
         self.assertIsNone(self.store.get_pending_action(user_key))
         self.assertEqual(self.store.find_transactions(user_key), [])
         self.assertEqual(len(self.store.recent_turns(user_key)), 2)
+
+
+class TestConcurrency(unittest.IsolatedAsyncioTestCase):
+    async def test_work_is_bounded_and_user_locks_are_stable(self):
+        locks = {}
+        self.assertIs(_user_lock(locks, "a"), _user_lock(locks, "a"))
+        self.assertIsNot(_user_lock(locks, "a"), _user_lock(locks, "b"))
+
+        active = peak = 0
+        guard = threading.Lock()
+
+        def work(value):
+            nonlocal active, peak
+            with guard:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+            return value
+
+        limit = asyncio.Semaphore(2)
+        results = await asyncio.gather(*(
+            _run_limited(limit, work, value) for value in range(6)
+        ))
+        self.assertEqual(results, list(range(6)))
+        self.assertEqual(peak, 2)
+
+    async def test_cancellation_keeps_slot_until_thread_finishes(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def work():
+            started.set()
+            release.wait()
+
+        limit = asyncio.Semaphore(1)
+        task = asyncio.create_task(_run_limited(limit, work))
+        await asyncio.to_thread(started.wait)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertTrue(limit.locked())
+        self.assertFalse(task.done())
+
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(limit.locked())
 
 
 if __name__ == "__main__":
