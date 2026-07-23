@@ -63,7 +63,8 @@ class AgentPipeline:
         if not Config.ENABLE_AGENT:
             return self._rule_fallback(user_id, text, source)
 
-        # Fast path: skip LLM for obvious "lunch 250" (seconds → milliseconds)
+        # Optional local fast path ONLY if explicitly enabled.
+        # Default is OFF — smart Gemma layer owns intent (expense vs received, etc.).
         if Config.AGENT_FAST_PATH and source in ("text", "voice"):
             fast = self._try_fast_expense(user_id, text, source)
             if fast is not None:
@@ -166,10 +167,8 @@ class AgentPipeline:
         SessionStore.clear_pending_action(user_id)
         registry = get_default_registry()
 
-        if action == "log_expense":
+        if action in ("log_expense", "log_income"):
             payload = {**payload, "amount": payload.get("amount")}
-            # bypass confirm by using structured service directly
-            from datetime import datetime
             from src.timeutils.dates import inclusive_datetime_range, parse_absolute_date
 
             ts = None
@@ -177,6 +176,9 @@ class AgentPipeline:
                 d = parse_absolute_date(payload["date"])
                 start, _ = inclusive_datetime_range(d, d, _user_tz(user_id))
                 ts = start.replace(hour=12)
+            direction = payload.get("direction") or (
+                "income" if action == "log_income" else "expense"
+            )
             result = TransactionService.log_expense_structured(
                 user_id=user_id,
                 amount=float(payload.get("amount") or 0),
@@ -186,14 +188,16 @@ class AgentPipeline:
                 mode=payload.get("mode") or "personal",
                 source=payload.get("source") or "text",
                 timestamp=ts,
+                direction=direction,
             )
             if result.get("success"):
                 t = result.get("transaction") or {}
+                kind = "Received" if direction == "income" else "Logged"
                 return (
-                    f"Confirmed. Logged ₹{t.get('amount')} "
+                    f"Confirmed. {kind} ₹{t.get('amount')} "
                     f"({t.get('merchant') or t.get('category')})."
                 )
-            return result.get("message") or "Could not log expense."
+            return result.get("message") or "Could not log."
 
         if action == "delete_transaction":
             result = registry.execute(

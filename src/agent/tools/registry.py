@@ -122,6 +122,7 @@ def handle_log_expense(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
         "mode": args.get("mode") or "personal",
         "source": source,
         "date": date_str,
+        "direction": "expense",
     }
     confirm = _maybe_confirm_amount(user_id, amount, "log_expense", payload)
     if confirm:
@@ -136,6 +137,50 @@ def handle_log_expense(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
         mode=args.get("mode") or "personal",
         source=source,
         timestamp=ts,
+        direction="expense",
+    )
+    return result
+
+
+def handle_log_income(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Money received / refund / transfer in (smart layer)."""
+    amount = float(args.get("amount") or 0)
+    if amount <= 0:
+        return {"ok": False, "error": "amount must be > 0"}
+
+    tz = _user_tz(user_id)
+    date_str = args.get("date")
+    ts = _resolve_txn_timestamp(date_str, tz)
+    source = args.get("source") or "text"
+    # merchant = who paid / source of money
+    merchant = args.get("merchant") or args.get("from") or args.get("payer") or "Received"
+    category = args.get("category") or args.get("against") or "other"
+    notes = args.get("notes") or ""
+    payload = {
+        "amount": amount,
+        "category": category,
+        "merchant": merchant,
+        "notes": notes,
+        "mode": args.get("mode") or "personal",
+        "source": source,
+        "date": date_str,
+        "direction": "income",
+    }
+    confirm = _maybe_confirm_amount(user_id, amount, "log_income", payload)
+    if confirm:
+        confirm["message"] = f"Confirm received ₹{amount:.0f} from {merchant}? Reply yes or no."
+        return confirm
+
+    result = TransactionService.log_expense_structured(
+        user_id=user_id,
+        amount=amount,
+        category=category,
+        merchant=merchant,
+        notes=notes,
+        mode=args.get("mode") or "personal",
+        source=source,
+        timestamp=ts,
+        direction="income",
     )
     return result
 
@@ -239,10 +284,16 @@ def handle_query_spending(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "from_date and to_date (YYYY-MM-DD) are required"}
     group_by = (args.get("group_by") or "none").lower()
     category = args.get("category")
+    direction = (args.get("direction") or "expense").lower()
     tz = _user_tz(user_id)
     if group_by in ("none", "", "total"):
         return TransactionService.sum_spending(
-            user_id, from_date, to_date, category=category, timezone=tz
+            user_id,
+            from_date,
+            to_date,
+            category=category,
+            timezone=tz,
+            direction=direction,
         )
     return TransactionService.spending_breakdown(
         user_id,
@@ -310,8 +361,9 @@ def get_default_registry() -> ToolRegistry:
         ToolSpec(
             name="log_expense",
             description=(
-                "Log a new expense. Use absolute date YYYY-MM-DD when user specifies a day; "
-                "omit date for today. category examples: food, transport, shopping, utilities, health, other."
+                "Log money OUT (spent/paid/bought). Use for expenses only — NOT for money received. "
+                "category: food|transport|shopping|utilities|health|entertainment|education|other. "
+                "date YYYY-MM-DD optional (default today)."
             ),
             parameters={
                 "type": "object",
@@ -327,6 +379,36 @@ def get_default_registry() -> ToolRegistry:
                 "required": ["amount"],
             },
             handler=handle_log_expense,
+        ),
+        ToolSpec(
+            name="log_income",
+            description=(
+                "Log money IN: received, got, refund, salary credit, transfer from someone. "
+                "Examples: 'received 5000 from mom', 'got refund 200 amazon', "
+                "'received 1500 against food' (set category=food to credit food pocket). "
+                "merchant/from = who paid; category/against = pocket if relevant."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number"},
+                    "merchant": {
+                        "type": "string",
+                        "description": "Who the money came from (mom, employer, amazon refund…)",
+                    },
+                    "from": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "description": "Optional pocket/category, e.g. food when 'against food'",
+                    },
+                    "against": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "source": {"type": "string", "enum": ["text", "voice", "bill"]},
+                },
+                "required": ["amount"],
+            },
+            handler=handle_log_income,
         ),
         ToolSpec(
             name="update_transaction",
@@ -407,7 +489,8 @@ def get_default_registry() -> ToolRegistry:
         ToolSpec(
             name="query_spending",
             description=(
-                "Sum spending for an inclusive date range. Always pass absolute YYYY-MM-DD. "
+                "Sum money movements for a date range (absolute YYYY-MM-DD). "
+                "Default direction=expense (spending). Use direction=income for money received. "
                 "group_by: none|category|day|merchant."
             ),
             parameters={
@@ -420,6 +503,10 @@ def get_default_registry() -> ToolRegistry:
                         "enum": ["none", "category", "day", "merchant"],
                     },
                     "category": {"type": "string"},
+                    "direction": {
+                        "type": "string",
+                        "enum": ["expense", "income", "all"],
+                    },
                 },
                 "required": ["from_date", "to_date"],
             },

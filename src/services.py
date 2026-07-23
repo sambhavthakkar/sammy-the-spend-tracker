@@ -510,6 +510,7 @@ class TransactionService:
             "currency": t.currency,
             "category": t.category,
             "merchant": t.merchant,
+            "direction": getattr(t, "direction", None) or "expense",
             "source": t.source.value if t.source else "text",
             "mode": t.mode.value if t.mode else "personal",
             "timestamp": t.timestamp.isoformat() if t.timestamp else None,
@@ -579,20 +580,31 @@ class TransactionService:
         source: str = "text",
         timestamp: Optional[datetime] = None,
         currency: Optional[str] = None,
+        direction: str = "expense",
     ) -> Dict[str, Any]:
-        """Log expense from structured agent/tool fields (DB is source of truth)."""
+        """
+        Log a money movement from agent/tool fields (DB is source of truth).
+
+        direction:
+          - expense: money out (default)
+          - income: money in (received / refund / transfer in)
+        """
         db = get_db()
         try:
             if amount is None or float(amount) <= 0:
                 return {"success": False, "message": "Amount must be a positive number"}
 
             amount = float(amount)
+            direction = (direction or "expense").strip().lower()
+            if direction not in ("expense", "income"):
+                direction = "expense"
+
             merchant = (merchant or "").strip() or "Unknown"
             notes = (notes or "").strip()
             text_for_category = notes or merchant
 
             if not category:
-                # Reuse rule parser category logic without inventing amount
+                # Prefer smart agent to pass category; rule helper is last resort only
                 category = expense_parser._determine_category_with_user_preference(
                     user_id, merchant, text_for_category
                 )
@@ -620,6 +632,7 @@ class TransactionService:
                 currency=cur,
                 category=category,
                 merchant=merchant,
+                direction=direction,
                 source=source_enum,
                 mode=mode_enum,
                 notes=notes or f"{merchant} {amount}".strip(),
@@ -628,16 +641,25 @@ class TransactionService:
             db.add(transaction)
             db.flush()
 
-            pocket_update_result = TransactionService._apply_pocket_spend(
-                db, user_id, category, amount
-            )
+            pocket_update_result = {"success": False, "message": "n/a for income"}
+            if direction == "expense":
+                pocket_update_result = TransactionService._apply_pocket_spend(
+                    db, user_id, category, amount
+                )
+            elif direction == "income" and category and category != "other":
+                # Optional: credit pocket when "received against food"
+                pocket_update_result = TransactionService._apply_pocket_spend(
+                    db, user_id, category, -amount
+                )
 
             db.commit()
             db.refresh(transaction)
-            logger.info(f"Structured expense {transaction.id} user={user_id} amount={amount}")
+            logger.info(
+                f"Structured {direction} {transaction.id} user={user_id} amount={amount}"
+            )
             return {
                 "success": True,
-                "message": "Expense logged successfully",
+                "message": f"{direction.title()} logged successfully",
                 "transaction_id": transaction.id,
                 "transaction": TransactionService._txn_to_dict(transaction),
                 "pocket_update": pocket_update_result,
@@ -694,14 +716,16 @@ class TransactionService:
         to_date: str,
         category: Optional[str] = None,
         timezone: Optional[str] = None,
+        direction: str = "expense",
     ) -> Dict[str, Any]:
-        """Sum spending for an inclusive date range."""
-        from sqlalchemy import func
+        """Sum transactions for an inclusive date range (default: expenses only)."""
+        from sqlalchemy import func, or_
 
         db = get_db()
         try:
             tz = timezone or Config.AGENT_TIMEZONE_DEFAULT
             start, end = inclusive_datetime_range(from_date, to_date, tz)
+            direction = (direction or "expense").lower()
             q = db.query(
                 func.coalesce(func.sum(Transaction.amount), 0.0),
                 func.count(Transaction.id),
@@ -710,6 +734,15 @@ class TransactionService:
                 Transaction.timestamp >= start,
                 Transaction.timestamp <= end,
             )
+            if direction == "income":
+                q = q.filter(Transaction.direction == "income")
+            elif direction == "all":
+                pass
+            else:
+                # expenses + legacy rows without direction
+                q = q.filter(
+                    or_(Transaction.direction == "expense", Transaction.direction.is_(None))
+                )
             if category:
                 q = q.filter(Transaction.category == category.lower().strip())
             total, count = q.one()
@@ -718,6 +751,7 @@ class TransactionService:
                 "from_date": from_date,
                 "to_date": to_date,
                 "category": category,
+                "direction": direction,
                 "total": float(total or 0.0),
                 "count": int(count or 0),
             }
@@ -753,6 +787,8 @@ class TransactionService:
                 key_col = Transaction.category.label("key")
                 group_by = "category"
 
+            from sqlalchemy import or_
+
             q = db.query(
                 key_col,
                 func.coalesce(func.sum(Transaction.amount), 0.0),
@@ -761,6 +797,7 @@ class TransactionService:
                 Transaction.user_id == user_id,
                 Transaction.timestamp >= start,
                 Transaction.timestamp <= end,
+                or_(Transaction.direction == "expense", Transaction.direction.is_(None)),
             )
             if category:
                 q = q.filter(Transaction.category == category.lower().strip())

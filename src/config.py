@@ -46,8 +46,8 @@ class Config:
     OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv('OLLAMA_TIMEOUT_SECONDS', '45'))
     OLLAMA_MAX_TOOL_ROUNDS: int = int(os.getenv('OLLAMA_MAX_TOOL_ROUNDS', '4'))
     LLM_TOOL_MODE: str = os.getenv('LLM_TOOL_MODE', 'native')  # native | json
-    # Skip LLM for simple "lunch 250" style messages (much faster)
-    AGENT_FAST_PATH: bool = os.getenv('AGENT_FAST_PATH', 'True').lower() == 'true'
+    # Local rule shortcut for simple "lunch 250" — OFF by default (smart agent owns intent)
+    AGENT_FAST_PATH: bool = os.getenv('AGENT_FAST_PATH', 'False').lower() == 'true'
     # Max edge length for bill photos before Gemma vision (smaller = faster)
     BILL_IMAGE_MAX_SIDE: int = int(os.getenv('BILL_IMAGE_MAX_SIDE', '1280'))
     BILL_IMAGE_JPEG_QUALITY: int = int(os.getenv('BILL_IMAGE_JPEG_QUALITY', '75'))

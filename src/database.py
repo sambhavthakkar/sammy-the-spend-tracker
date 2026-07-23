@@ -96,6 +96,8 @@ class Transaction(Base):
     currency = Column(String(3), default='INR')
     category = Column(String(100), nullable=False)
     merchant = Column(String(200))
+    # expense = money out; income = money in (received/refund/salary entry)
+    direction = Column(String(20), default='expense', nullable=False, index=True)
     source = Column(Enum(TransactionSource), default=TransactionSource.TEXT)
     mode = Column(Enum(TransactionMode), default=TransactionMode.PERSONAL)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -569,17 +571,16 @@ def _ensure_sqlite_user_columns(engine) -> None:
         alters.append("ALTER TABLE users ADD COLUMN currency VARCHAR(3) DEFAULT 'INR'")
 
     if not alters:
-        return
-
-    with engine.begin() as conn:
-        for stmt in alters:
-            try:
-                conn.execute(text(stmt))
-            except Exception as e:
-                if not _is_already_exists_error(e):
-                    # Column may already exist under race
-                    if "duplicate column" not in str(e).lower():
-                        raise
+        pass
+    else:
+        with engine.begin() as conn:
+            for stmt in alters:
+                try:
+                    conn.execute(text(stmt))
+                except Exception as e:
+                    if not _is_already_exists_error(e):
+                        if "duplicate column" not in str(e).lower():
+                            raise
 
     # Optional unique index for telegram_id (ignore if present)
     try:
@@ -592,6 +593,28 @@ def _ensure_sqlite_user_columns(engine) -> None:
             )
     except Exception:
         pass
+
+    # Transaction direction: expense | income
+    if "transactions" in inspector.get_table_names():
+        tcols = {c["name"] for c in inspector.get_columns("transactions")}
+        if "direction" not in tcols:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE transactions ADD COLUMN direction "
+                            "VARCHAR(20) DEFAULT 'expense' NOT NULL"
+                        )
+                    )
+                    conn.execute(
+                        text(
+                            "CREATE INDEX IF NOT EXISTS ix_transactions_direction "
+                            "ON transactions (direction)"
+                        )
+                    )
+            except Exception as e:
+                if "duplicate column" not in str(e).lower() and not _is_already_exists_error(e):
+                    raise
 
 
 def get_session_local(engine):
