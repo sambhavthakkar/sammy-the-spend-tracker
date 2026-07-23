@@ -21,6 +21,10 @@ class Config:
     # Prefer absolute sqlite path so cwd changes don't split data across files
     _default_db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'budgetbot.db')
     DATABASE_URL: str = os.getenv('DATABASE_URL', f'sqlite:///{_default_db}')
+    PERSONAL_DATA_DIR: str = os.getenv(
+        'PERSONAL_DATA_DIR',
+        os.path.join(os.path.dirname(_default_db), 'personal_data'),
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS: bool = False
     SQLALCHEMY_ECHO: bool = os.getenv('SQLALCHEMY_ECHO', 'False').lower() == 'true'
 
