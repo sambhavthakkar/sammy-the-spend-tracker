@@ -66,6 +66,7 @@ class Config:
     TELEGRAM_ALLOWED_USER_IDS: str = os.getenv('TELEGRAM_ALLOWED_USER_IDS', '')
 
     # Agent settings
+    AGENT_CLI_USER_ID: str = os.getenv('AGENT_CLI_USER_ID', 'default')
     AGENT_TIMEZONE_DEFAULT: str = os.getenv('AGENT_TIMEZONE_DEFAULT', 'Asia/Kolkata')
     AGENT_CURRENCY_DEFAULT: str = os.getenv('AGENT_CURRENCY_DEFAULT', 'INR')
     AGENT_CONFIRM_AMOUNT_THRESHOLD: float = float(os.getenv('AGENT_CONFIRM_AMOUNT_THRESHOLD', '10000'))

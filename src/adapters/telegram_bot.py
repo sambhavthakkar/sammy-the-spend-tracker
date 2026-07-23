@@ -7,16 +7,16 @@ Requires: TELEGRAM_BOT_TOKEN and python-telegram-bot installed.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import math
+import os
+from datetime import date
+from pathlib import Path
 from typing import Optional, Set
 
-from src.adapters.message_types import NormalizedInboundMessage
-from src.agent.pipeline import AgentPipeline
-from src.agent.session_store import SessionStore
 from src.config import Config
-from src.database import init_db
 from src.logging_config import get_logger
-from src.services import PocketService, UserService
+from src.media.bill_vision import BillExtraction, extract_bill_from_image
+from src.personal_store import PersonalStore
 
 logger = get_logger(__name__)
 
@@ -24,6 +24,55 @@ logger = get_logger(__name__)
 def _allowed_ids() -> Set[str]:
     """Fresh allowlist from .env (comma-separated Telegram user IDs)."""
     return Config.telegram_allowlist()
+
+
+def _source_ref(update_id: object, source: str) -> str:
+    return f"telegram:{update_id}:{source}"
+
+
+def _prepare_bill_confirmation(
+    store: PersonalStore,
+    user_key: str,
+    extraction: BillExtraction,
+    source_ref: str,
+    caption: str = "",
+) -> str:
+    """Persist a concise bill exchange and stage a private transaction confirmation."""
+    if not extraction.is_bill or not math.isfinite(extraction.amount) or extraction.amount <= 0:
+        reply = extraction.summary or (
+            "I couldn't find a readable bill amount. Try a clearer photo or type it."
+        )
+    else:
+        merchant = extraction.merchant.strip() or "Unknown merchant"
+        detail = caption.strip() or extraction.notes.strip()
+        description = " — ".join(part for part in (merchant, detail) if part)[:500]
+        currency = extraction.currency
+        if len(currency) != 3 or not currency.isalpha():
+            currency = Config.AGENT_CURRENCY_DEFAULT
+        payload = {
+            "kind": "expense",
+            "amount": str(extraction.amount),
+            "category": extraction.category or "other",
+            "description": description,
+            "source_ref": source_ref,
+            "currency": currency,
+        }
+        if extraction.date:
+            try:
+                date.fromisoformat(extraction.date)
+                payload["occurred_at"] = extraction.date
+            except ValueError:
+                pass
+        store.set_pending_action(user_key, "record_transaction", payload)
+        reply = (
+            f"I found {merchant}: {payload['currency'].upper()} {extraction.amount:g} "
+            f"({payload['category']}). Record this expense? Reply yes or no."
+        )
+
+    bill_turn = f"[bill photo]{' ' + caption.strip() if caption.strip() else ''}"
+    store.append_turn(user_key, "user", bill_turn)
+    store.append_turn(user_key, "assistant", reply)
+    return reply
 
 
 def run_telegram_bot() -> None:
@@ -50,9 +99,10 @@ def run_telegram_bot() -> None:
             f"Details: {e}"
         ) from e
 
-    # Ensure schema exists only — never deletes user data
-    init_db(reset=False)
-    pipeline = AgentPipeline()
+    from src.personal_agent import PersonalAgent
+
+    store = PersonalStore()
+    agent = PersonalAgent(store=store)
 
     async def _ensure_user(update: Update) -> Optional[str]:
         user = update.effective_user
@@ -67,67 +117,34 @@ def run_telegram_bot() -> None:
                     "Sorry, this bot is private."
                 )
             return None
-        result = UserService.get_or_create_by_telegram(
-            tid, name=user.full_name or user.username
+        return store.resolve_user(
+            "telegram", tid, display_name=user.full_name or user.username
         )
-        if not result.get("success"):
-            return None
-        user_id = result["user"]["id"]
-        # Only seed pockets when user was just created (avoid DB hit every message)
-        if result.get("created"):
-            try:
-                PocketService.seed_default_pockets(user_id)
-            except Exception as e:
-                logger.warning(f"pocket seed: {e}")
-        return user_id
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = await _ensure_user(update)
         if not user_id or not update.effective_message:
             return
-        # Backfill pockets once on /start for older users
-        try:
-            PocketService.seed_default_pockets(user_id)
-        except Exception as e:
-            logger.warning(f"pocket seed on start: {e}")
-        name = (update.effective_user.full_name if update.effective_user else "there")
-        pockets = PocketService.get_user_pockets(user_id)
-        pocket_line = ", ".join(p["name"] for p in pockets[:6]) if pockets else "none yet"
+        name = update.effective_user.full_name if update.effective_user else "there"
         await update.effective_message.reply_text(
-            f"Hi {name}! I'm BudgetBot — your personal finance agent.\n\n"
-            "Just type naturally (no special commands):\n"
-            "• lunch 250\n"
-            "• received 5000 from mom\n"
-            "• got refund 200 from amazon\n"
-            "• received 1500 against food\n"
-            "• cousin sent 800 for dinner share\n"
-            "• how much did I spend this week?\n"
-            "• how much can I still spend?\n"
-            "• change last to transport\n"
-            "• delete last\n"
-            "• set income to 80000  (monthly salary profile)\n\n"
-            f"Starter pockets: {pocket_line}\n"
-            "Tip: set your monthly income so “how much left?” is meaningful.\n"
-            "Voice: say “lunch two hundred fifty”.\n"
-            "Bills: send a clear photo of the receipt — Gemma reads it."
+            f"Hi {name}! I'm your private personal assistant.\n\n"
+            "Talk to me naturally. I can remember preferences, goals, and events, "
+            "help manage spending, and answer questions using what you've shared.\n\n"
+            "You can type, send a voice note, or send a clear bill photo."
         )
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                "Examples:\n"
-                "• coffee 120\n"
-                "• paid Mohit 500\n"
-                "• uber 300 yesterday\n"
-                "• food last week?\n"
-                "• biggest expenses this month\n"
-                "• how much can I still spend?\n"
-                "• change last to transport\n"
-                "• delete last\n"
-                "• set food pocket to 10000\n"
-                "• voice note: “spent 400 on petrol”\n"
-                "• photo of a bill / receipt / UPI screenshot"
-            )
+        if not await _ensure_user(update) or not update.effective_message:
+            return
+        await update.effective_message.reply_text(
+            "Chat naturally with your private personal assistant. For example:\n"
+            "• remember that I prefer quiet restaurants\n"
+            "• my goal is to run a 10K this year\n"
+            "• I have a dentist appointment Friday\n"
+            "• spent 400 on groceries\n"
+            "• how much did I spend this month?\n"
+            "You can also send a voice note or a bill photo."
+        )
 
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message or not update.effective_message.text:
@@ -137,17 +154,21 @@ def run_telegram_bot() -> None:
             return
 
         update_id = str(update.update_id)
-        if not SessionStore.try_mark_processed("telegram", update_id, user_id):
+        if not store.mark_processed(user_id, "telegram", update_id):
             logger.info(f"Skipping duplicate update {update_id}")
             return
 
         text = update.effective_message.text
         await update.effective_message.chat.send_action("typing")
 
-        result = await asyncio.to_thread(
-            pipeline.handle_text, user_id, text, "text"
+        reply = await asyncio.to_thread(
+            agent.chat,
+            user_id,
+            text,
+            source="text",
+            source_ref=_source_ref(update_id, "text"),
         )
-        reply = result.text or "…"
+        reply = reply or "…"
         # Telegram message limit ~4096
         for i in range(0, len(reply), 3500):
             await update.effective_message.reply_text(reply[i : i + 3500])
@@ -160,7 +181,7 @@ def run_telegram_bot() -> None:
             return
 
         update_id = str(update.update_id)
-        if not SessionStore.try_mark_processed("telegram", update_id, user_id):
+        if not store.mark_processed(user_id, "telegram", update_id):
             return
 
         if not Config.ENABLE_VOICE_PROCESSING:
@@ -176,8 +197,6 @@ def run_telegram_bot() -> None:
 
         await update.effective_message.chat.send_action("record_voice")
         file = await context.bot.get_file(voice.file_id)
-        import os
-        from pathlib import Path
 
         os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
         # Telegram voice is typically OGG/Opus
@@ -214,15 +233,19 @@ def run_telegram_bot() -> None:
             await update.effective_message.reply_text(f"Heard: {heard}")
 
         await update.effective_message.chat.send_action("typing")
-        result = await asyncio.to_thread(
-            pipeline.handle_text, user_id, transcript, "voice"
+        reply = await asyncio.to_thread(
+            agent.chat,
+            user_id,
+            transcript,
+            source="voice",
+            source_ref=_source_ref(update_id, "voice"),
         )
-        reply = result.text or "…"
+        reply = reply or "…"
         for i in range(0, len(reply), 3500):
             await update.effective_message.reply_text(reply[i : i + 3500])
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Bill / receipt photo → Gemma vision → log expense."""
+        """Bill / receipt photo → Gemma vision → private pending action."""
         if not update.effective_message:
             return
         user_id = await _ensure_user(update)
@@ -230,7 +253,7 @@ def run_telegram_bot() -> None:
             return
 
         update_id = str(update.update_id)
-        if not SessionStore.try_mark_processed("telegram", update_id, user_id):
+        if not store.mark_processed(user_id, "telegram", update_id):
             return
 
         if not Config.ENABLE_BILL_VISION:
@@ -238,11 +261,6 @@ def run_telegram_bot() -> None:
                 "Bill photos are disabled. Set ENABLE_BILL_VISION=True in .env."
             )
             return
-
-        import os
-        from pathlib import Path
-
-        from src.agent.bill_pipeline import handle_bill_image
 
         # Prefer highest resolution photo; also accept image documents
         mime = "image/jpeg"
@@ -271,20 +289,20 @@ def run_telegram_bot() -> None:
         await update.effective_message.chat.send_action("typing")
 
         try:
-            result = await asyncio.to_thread(
-                handle_bill_image, user_id, dest, mime
+            extraction = await asyncio.to_thread(extract_bill_from_image, dest, mime)
+            reply = _prepare_bill_confirmation(
+                store,
+                user_id,
+                extraction,
+                _source_ref(update_id, "bill"),
+                caption,
             )
-            reply = result.text or "…"
-            # If user added a caption like "this was transport", fold into follow-up
-            if caption and result.text and "Log this?" not in (result.text or ""):
-                # Optional: pass caption to agent as correction hint next turn
-                SessionStore.append_turn(user_id, "user", f"[bill caption] {caption}")
         except Exception as e:
             logger.error(f"Bill photo failed: {e}")
-            reply = (
-                "I couldn't read that image with Gemma. "
-                "Send a clearer photo of the total, or type e.g. `swiggy 450`."
-            )
+            reply = "I couldn't read that image. Send a clearer photo or type the amount."
+            bill_turn = f"[bill photo]{' ' + caption if caption else ''}"
+            store.append_turn(user_id, "user", bill_turn)
+            store.append_turn(user_id, "assistant", reply)
         finally:
             try:
                 dest.unlink(missing_ok=True)
@@ -326,7 +344,4 @@ def run_telegram_bot() -> None:
             drop_pending_updates=True,
         )
 
-
-# Avoid NameError in webhook branch without top-level import always
-import os  # noqa: E402
 
