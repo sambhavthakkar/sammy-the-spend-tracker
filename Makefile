@@ -19,12 +19,24 @@ setup: ## Install dependencies and create .env
 
 bot: ## Start or restart the Telegram bot in tmux
 	@command -v tmux >/dev/null || { echo "tmux is not installed"; exit 1; }
+	@test -x $(PY) || { echo "Run 'make setup' first"; exit 1; }
 	@$(MAKE) stop
-	@tmux new-session -d -s $(SESSION) "cd '$(CURDIR)' && exec $(PY) -u main.py telegram"
-	@echo "Bot started. View it with: make logs"
+	@mkdir -p logs
+	@: > logs/telegram.log
+	@tmux new-session -d -s $(SESSION) "cd '$(CURDIR)' && $(PY) -u main.py telegram 2>&1 | tee logs/telegram.log"
+	@sleep 2
+	@if tmux has-session -t $(SESSION) 2>/dev/null; then \
+		echo "Bot started. View it with: make logs"; \
+	else \
+		echo "Bot failed to start:"; tail -n 30 logs/telegram.log; exit 1; \
+	fi
 
 logs: ## Attach to the bot's tmux session
-	@tmux attach-session -t $(SESSION)
+	@if tmux has-session -t $(SESSION) 2>/dev/null; then \
+		tmux attach-session -t $(SESSION); \
+	else \
+		echo "Bot is not running. Last output:"; tail -n 30 logs/telegram.log 2>/dev/null || true; \
+	fi
 
 stop: ## Stop the Telegram bot
 	@-tmux kill-session -t $(SESSION) 2>/dev/null || true
