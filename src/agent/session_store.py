@@ -34,21 +34,24 @@ class SessionStore:
             db.add(turn)
             db.commit()
 
+            # Prune occasionally (not every message) to keep writes fast
             keep = max_turns or Config.AGENT_MEMORY_TURNS
-            # Prune older turns
-            ids = [
-                r.id
-                for r in db.query(ConversationTurn.id)
-                .filter(ConversationTurn.user_id == user_id)
-                .order_by(ConversationTurn.created_at.desc())
-                .offset(keep)
-                .all()
-            ]
-            if ids:
-                db.query(ConversationTurn).filter(ConversationTurn.id.in_(ids)).delete(
-                    synchronize_session=False
-                )
-                db.commit()
+            import random
+
+            if random.random() < 0.15:
+                ids = [
+                    r.id
+                    for r in db.query(ConversationTurn.id)
+                    .filter(ConversationTurn.user_id == user_id)
+                    .order_by(ConversationTurn.created_at.desc())
+                    .offset(keep * 2)
+                    .all()
+                ]
+                if ids:
+                    db.query(ConversationTurn).filter(ConversationTurn.id.in_(ids)).delete(
+                        synchronize_session=False
+                    )
+                    db.commit()
         except Exception as e:
             db.rollback()
             logger.error(f"append_turn failed: {e}")

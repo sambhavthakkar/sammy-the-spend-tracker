@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 
 
 def _allowed_ids() -> Set[str]:
+    """Fresh allowlist from .env (comma-separated Telegram user IDs)."""
     return Config.telegram_allowlist()
 
 
@@ -51,13 +52,14 @@ def run_telegram_bot() -> None:
 
     init_db()
     pipeline = AgentPipeline()
-    allow = _allowed_ids()
 
     async def _ensure_user(update: Update) -> Optional[str]:
         user = update.effective_user
         if not user:
             return None
         tid = str(user.id)
+        # Reload allowlist every message so .env edits apply without restart
+        allow = _allowed_ids()
         if allow and tid not in allow:
             if update.effective_message:
                 await update.effective_message.reply_text(
@@ -70,17 +72,23 @@ def run_telegram_bot() -> None:
         if not result.get("success"):
             return None
         user_id = result["user"]["id"]
-        # Existing users created before default pockets still get them once
-        try:
-            PocketService.seed_default_pockets(user_id)
-        except Exception as e:
-            logger.warning(f"pocket seed: {e}")
+        # Only seed pockets when user was just created (avoid DB hit every message)
+        if result.get("created"):
+            try:
+                PocketService.seed_default_pockets(user_id)
+            except Exception as e:
+                logger.warning(f"pocket seed: {e}")
         return user_id
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = await _ensure_user(update)
         if not user_id or not update.effective_message:
             return
+        # Backfill pockets once on /start for older users
+        try:
+            PocketService.seed_default_pockets(user_id)
+        except Exception as e:
+            logger.warning(f"pocket seed on start: {e}")
         name = (update.effective_user.full_name if update.effective_user else "there")
         pockets = PocketService.get_user_pockets(user_id)
         pocket_line = ", ".join(p["name"] for p in pockets[:6]) if pockets else "none yet"

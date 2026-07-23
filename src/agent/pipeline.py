@@ -59,13 +59,20 @@ class AgentPipeline:
             SessionStore.append_turn(user_id, "assistant", reply)
             return PipelineResult(text=reply, user_id=user_id)
 
-        # Optional rule-parser fast path for obvious expenses when agent disabled or as pre-check
+        # Optional rule-parser only mode
         if not Config.ENABLE_AGENT:
             return self._rule_fallback(user_id, text, source)
 
+        # Fast path: skip LLM for obvious "lunch 250" (seconds → milliseconds)
+        if Config.AGENT_FAST_PATH and source in ("text", "voice"):
+            fast = self._try_fast_expense(user_id, text, source)
+            if fast is not None:
+                return fast
+
         ctx = ContextBuilder.build(user_id)
         system_context = ContextBuilder.format_system_context(ctx)
-        memory = ctx.get("memory") or []
+        # Slim memory for lower latency
+        memory = (ctx.get("memory") or [])[-Config.AGENT_MEMORY_TURNS :]
 
         # Hint voice source to the model
         user_payload = text
@@ -92,6 +99,64 @@ class AgentPipeline:
                 return self._rule_fallback(user_id, text, source)
             reply = "Something went wrong on my side. Please try again."
             return PipelineResult(text=reply, user_id=user_id, used_fallback=True)
+
+    def _try_fast_expense(
+        self, user_id: str, text: str, source: str
+    ) -> Optional[PipelineResult]:
+        from src.agent.fast_path import try_parse_simple_expense
+
+        parsed = try_parse_simple_expense(text, user_id)
+        if not parsed:
+            return None
+        amount, category, merchant, notes = parsed
+
+        # Still confirm very large amounts
+        user = UserService.get_user(user_id) or {}
+        income = float(user.get("income") or 0)
+        if amount >= Config.AGENT_CONFIRM_AMOUNT_THRESHOLD or (
+            income > 0 and amount >= income * Config.AGENT_CONFIRM_INCOME_FRACTION
+        ):
+            SessionStore.set_pending_action(
+                user_id,
+                "log_expense",
+                {
+                    "amount": amount,
+                    "category": category,
+                    "merchant": merchant,
+                    "notes": notes,
+                    "mode": "personal",
+                    "source": source if source in ("text", "voice", "bill") else "text",
+                },
+            )
+            reply = f"Log ₹{amount:.0f} ({merchant} / {category})? Reply yes or no."
+            SessionStore.append_turn(user_id, "user", text)
+            SessionStore.append_turn(user_id, "assistant", reply)
+            return PipelineResult(text=reply, user_id=user_id, used_fallback=True)
+
+        result = TransactionService.log_expense_structured(
+            user_id=user_id,
+            amount=amount,
+            category=category,
+            merchant=merchant,
+            notes=notes,
+            mode="personal",
+            source=source if source in ("text", "voice", "bill") else "text",
+        )
+        if not result.get("success"):
+            return None  # fall through to full agent
+
+        t = result.get("transaction") or {}
+        pocket = result.get("pocket_update") or {}
+        reply = (
+            f"Logged ₹{t.get('amount')} under {t.get('category')} "
+            f"({t.get('merchant')})."
+        )
+        if pocket.get("success") and pocket.get("remaining") is not None:
+            reply += f" {pocket.get('pocket_name')} left: ₹{float(pocket['remaining']):.0f}."
+        SessionStore.append_turn(user_id, "user", text)
+        SessionStore.append_turn(user_id, "assistant", reply)
+        logger.info(f"Fast-path expense for user={user_id} amount={amount}")
+        return PipelineResult(text=reply, user_id=user_id, used_fallback=True)
 
     def _execute_pending(self, user_id: str, pending: dict) -> str:
         from src.agent.tools.registry import get_default_registry

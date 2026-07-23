@@ -76,6 +76,40 @@ class BillExtraction:
         }
 
 
+def _prepare_image_bytes(path: Path, mime: str) -> tuple[bytes, str]:
+    """
+    Downscale and JPEG-compress for faster vision uploads.
+    Falls back to raw bytes if Pillow is unavailable.
+    """
+    raw = path.read_bytes()
+    max_side = Config.BILL_IMAGE_MAX_SIDE
+    quality = Config.BILL_IMAGE_JPEG_QUALITY
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        img = Image.open(BytesIO(raw))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        elif img.mode == "L":
+            img = img.convert("RGB")
+        w, h = img.size
+        scale = min(1.0, float(max_side) / max(w, h))
+        if scale < 1.0:
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        out = buf.getvalue()
+        logger.info(f"Bill image prepared {w}x{h} → {img.size[0]}x{img.size[1]} bytes={len(raw)}→{len(out)}")
+        return out, "image/jpeg"
+    except Exception as e:
+        logger.warning(f"Pillow resize skipped: {e}")
+        if len(raw) > 8 * 1024 * 1024:
+            return b"", mime
+        return raw, mime
+
+
 def extract_bill_from_image(
     image_path: Path | str,
     mime: str = "image/jpeg",
@@ -97,9 +131,9 @@ def extract_bill_from_image(
             summary="Image file missing or empty.",
         )
 
-    data = path.read_bytes()
-    # Soft size guard (~8MB raw)
-    if len(data) > 8 * 1024 * 1024:
+    # Resize/compress before upload — large photos are the main vision latency cost
+    data, mime = _prepare_image_bytes(path, mime)
+    if not data:
         return BillExtraction(
             is_bill=False,
             amount=0.0,
@@ -110,7 +144,7 @@ def extract_bill_from_image(
             notes="",
             confidence=0.0,
             needs_confirmation=True,
-            summary="Image too large. Send a clearer smaller photo of the bill total.",
+            summary="Could not process image. Try another photo.",
         )
 
     b64 = base64.b64encode(data).decode("ascii")

@@ -43,9 +43,14 @@ class Config:
     OLLAMA_BASE_URL: str = os.getenv('OLLAMA_BASE_URL', 'https://ollama.com/v1')
     OLLAMA_API_KEY: Optional[str] = os.getenv('OLLAMA_API_KEY')
     OLLAMA_MODEL: str = os.getenv('OLLAMA_MODEL', 'gemma4:31b-cloud')
-    OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv('OLLAMA_TIMEOUT_SECONDS', '60'))
-    OLLAMA_MAX_TOOL_ROUNDS: int = int(os.getenv('OLLAMA_MAX_TOOL_ROUNDS', '6'))
+    OLLAMA_TIMEOUT_SECONDS: int = int(os.getenv('OLLAMA_TIMEOUT_SECONDS', '45'))
+    OLLAMA_MAX_TOOL_ROUNDS: int = int(os.getenv('OLLAMA_MAX_TOOL_ROUNDS', '4'))
     LLM_TOOL_MODE: str = os.getenv('LLM_TOOL_MODE', 'native')  # native | json
+    # Skip LLM for simple "lunch 250" style messages (much faster)
+    AGENT_FAST_PATH: bool = os.getenv('AGENT_FAST_PATH', 'True').lower() == 'true'
+    # Max edge length for bill photos before Gemma vision (smaller = faster)
+    BILL_IMAGE_MAX_SIDE: int = int(os.getenv('BILL_IMAGE_MAX_SIDE', '1280'))
+    BILL_IMAGE_JPEG_QUALITY: int = int(os.getenv('BILL_IMAGE_JPEG_QUALITY', '75'))
 
     # Telegram
     TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -59,14 +64,14 @@ class Config:
     AGENT_CURRENCY_DEFAULT: str = os.getenv('AGENT_CURRENCY_DEFAULT', 'INR')
     AGENT_CONFIRM_AMOUNT_THRESHOLD: float = float(os.getenv('AGENT_CONFIRM_AMOUNT_THRESHOLD', '10000'))
     AGENT_CONFIRM_INCOME_FRACTION: float = float(os.getenv('AGENT_CONFIRM_INCOME_FRACTION', '0.2'))
-    AGENT_MEMORY_TURNS: int = int(os.getenv('AGENT_MEMORY_TURNS', '20'))
-    AGENT_RECENT_TXNS: int = int(os.getenv('AGENT_RECENT_TXNS', '5'))
+    AGENT_MEMORY_TURNS: int = int(os.getenv('AGENT_MEMORY_TURNS', '8'))
+    AGENT_RECENT_TXNS: int = int(os.getenv('AGENT_RECENT_TXNS', '3'))
 
     # Voice / STT
     # auto | faster_whisper | openai | none
     STT_PROVIDER: str = os.getenv('STT_PROVIDER', 'auto')
     # faster-whisper: tiny|base|small|…  openai: whisper-1
-    STT_MODEL: str = os.getenv('STT_MODEL', 'base')
+    STT_MODEL: str = os.getenv('STT_MODEL', 'tiny')
     STT_LANGUAGE: str = os.getenv('STT_LANGUAGE', '')  # empty = auto-detect
     STT_DEVICE: str = os.getenv('STT_DEVICE', 'cpu')  # cpu | cuda
     STT_BASE_URL: Optional[str] = os.getenv('STT_BASE_URL')  # OpenAI-compatible base
@@ -98,13 +103,36 @@ class Config:
     ENABLE_AGENT: bool = os.getenv('ENABLE_AGENT', 'True').lower() == 'true'
     ENABLE_RULE_PARSER_FALLBACK: bool = os.getenv('ENABLE_RULE_PARSER_FALLBACK', 'True').lower() == 'true'
 
+    # Cached allowlist: re-read .env only when file mtime changes
+    _allowlist_cache: set = set()
+    _allowlist_mtime: float = -1.0
+
     @classmethod
     def telegram_allowlist(cls) -> set:
-        """Parse TELEGRAM_ALLOWED_USER_IDS into a set of strings."""
-        raw = (cls.TELEGRAM_ALLOWED_USER_IDS or '').strip()
+        """
+        Parse TELEGRAM_ALLOWED_USER_IDS (comma-separated).
+
+        Hot-reloads when `.env` is saved; otherwise uses a tiny in-memory cache
+        so every message is not re-parsing the file from disk.
+        """
+        env_path = os.path.join(os.getcwd(), '.env')
+        try:
+            mtime = os.path.getmtime(env_path) if os.path.isfile(env_path) else 0.0
+        except OSError:
+            mtime = 0.0
+
+        if mtime == cls._allowlist_mtime and cls._allowlist_mtime >= 0:
+            return set(cls._allowlist_cache)
+
+        load_dotenv(override=True)
+        raw = (os.getenv('TELEGRAM_ALLOWED_USER_IDS') or '').strip()
         if not raw:
-            return set()
-        return {part.strip() for part in raw.split(',') if part.strip()}
+            ids: set = set()
+        else:
+            ids = {part.strip() for part in raw.split(',') if part.strip()}
+        cls._allowlist_cache = ids
+        cls._allowlist_mtime = mtime
+        return set(ids)
 
     @staticmethod
     def init_app(app):

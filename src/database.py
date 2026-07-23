@@ -489,12 +489,24 @@ def create_database_engine():
     connect_args = {}
     if url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
+        # Reduce "database is locked" waits under concurrent short writes
+        connect_args["timeout"] = 15
     engine = create_engine(
         url,
         echo=os.getenv("SQLALCHEMY_ECHO", "False").lower() == "true",
         pool_pre_ping=True,
         connect_args=connect_args,
     )
+    if url.startswith("sqlite"):
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
     return engine
 
 def _is_already_exists_error(exc: Exception) -> bool:

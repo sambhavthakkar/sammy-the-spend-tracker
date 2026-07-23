@@ -48,6 +48,9 @@ python-telegram-bot>=21.0
 # Voice STT (local Whisper — recommended for personal bot)
 faster-whisper>=1.0.0
 
+# Bill photo resize (optional but speeds up Gemma vision a lot)
+Pillow>=10.0.0
+
 # For production deployment
 gunicorn==21.2.0
 # gevent optional; omit if build fails on your platform

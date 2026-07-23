@@ -542,9 +542,9 @@ class TransactionService:
             db.add(transaction)
             db.flush()
 
-            # Update pocket spending if applicable
-            pocket_update_result = TransactionService.update_pocket_spending_by_category(
-                user_id, parsed.category, parsed.amount
+            # Same session — avoids SQLite "database is locked"
+            pocket_update_result = TransactionService._apply_pocket_spend(
+                db, user_id, parsed.category, parsed.amount
             )
 
             db.commit()
@@ -628,8 +628,8 @@ class TransactionService:
             db.add(transaction)
             db.flush()
 
-            pocket_update_result = TransactionService.update_pocket_spending_by_category(
-                user_id, category, amount
+            pocket_update_result = TransactionService._apply_pocket_spend(
+                db, user_id, category, amount
             )
 
             db.commit()
@@ -903,72 +903,71 @@ class TransactionService:
             db.close()
 
     @staticmethod
-    def update_pocket_spending_by_category(user_id: str, category: str, amount: float) -> Dict[str, Any]:
-        """Update pocket spending based on category (internal method)"""
-        db = get_db()
-        try:
-            cat = (category or "other").strip().lower()
-            # category -> pocket name aliases
-            category_pocket_map = {
-                "food": ["food", "groceries", "dining", "restaurant"],
-                "transport": ["transport", "fuel", "commute", "travel", "uber", "ola"],
-                "shopping": ["shopping", "lifestyle", "clothes"],
-                "entertainment": ["entertainment", "fun", "movie"],
-                "utilities": ["utilities", "bills", "electricity", "internet", "recharge"],
-                "health": ["health", "medical", "medicine", "pharmacy"],
-                "education": ["education", "learning", "course"],
-                "other": ["other", "misc", "miscellaneous"],
-            }
+    def _apply_pocket_spend(db, user_id: str, category: str, amount: float) -> Dict[str, Any]:
+        """Update pocket spend on an existing session (no nested commit)."""
+        cat = (category or "other").strip().lower()
+        category_pocket_map = {
+            "food": ["food", "groceries", "dining", "restaurant"],
+            "transport": ["transport", "fuel", "commute", "travel", "uber", "ola"],
+            "shopping": ["shopping", "lifestyle", "clothes"],
+            "entertainment": ["entertainment", "fun", "movie"],
+            "utilities": ["utilities", "bills", "electricity", "internet", "recharge"],
+            "health": ["health", "medical", "medicine", "pharmacy"],
+            "education": ["education", "learning", "course"],
+            "other": ["other", "misc", "miscellaneous"],
+        }
 
-            target_pocket = None
-            pockets = db.query(Pocket).filter(Pocket.user_id == user_id).all()
+        target_pocket = None
+        pockets = db.query(Pocket).filter(Pocket.user_id == user_id).all()
 
-            # 1) Exact pocket name == category
+        for pocket in pockets:
+            if pocket.name.lower() == cat:
+                target_pocket = pocket
+                break
+
+        if not target_pocket:
+            aliases = [a.lower() for a in category_pocket_map.get(cat, [cat])]
             for pocket in pockets:
-                if pocket.name.lower() == cat:
+                pname = pocket.name.lower()
+                if pname in aliases or any(a in pname or pname in a for a in aliases):
                     target_pocket = pocket
                     break
 
-            # 2) Category aliases contain pocket name or vice versa
-            if not target_pocket:
-                aliases = [a.lower() for a in category_pocket_map.get(cat, [cat])]
-                for pocket in pockets:
-                    pname = pocket.name.lower()
-                    if pname in aliases or any(a in pname or pname in a for a in aliases):
-                        target_pocket = pocket
-                        break
+        if not target_pocket:
+            for pocket in pockets:
+                if "other" in pocket.name.lower() or "misc" in pocket.name.lower():
+                    target_pocket = pocket
+                    break
+        if not target_pocket and pockets:
+            target_pocket = pockets[0]
 
-            # 3) Other / first pocket
-            if not target_pocket:
-                for pocket in pockets:
-                    if "other" in pocket.name.lower() or "misc" in pocket.name.lower():
-                        target_pocket = pocket
-                        break
-            if not target_pocket and pockets:
-                target_pocket = pockets[0]
+        if not target_pocket:
+            return {"success": False, "message": "No matching pocket found for category"}
 
-            if target_pocket:
-                target_pocket.spent_mtd += amount
-                target_pocket.updated_at = datetime.utcnow()
+        target_pocket.spent_mtd += amount
+        target_pocket.updated_at = datetime.utcnow()
+        return {
+            "success": True,
+            "pocket_id": target_pocket.id,
+            "pocket_name": target_pocket.name,
+            "amount_added": amount,
+            "new_spent": target_pocket.spent_mtd,
+            "remaining": (
+                target_pocket.monthly_limit
+                - target_pocket.spent_mtd
+                + (target_pocket.rollover_balance or 0)
+            ),
+        }
+
+    @staticmethod
+    def update_pocket_spending_by_category(user_id: str, category: str, amount: float) -> Dict[str, Any]:
+        """Update pocket spending based on category (standalone session)."""
+        db = get_db()
+        try:
+            result = TransactionService._apply_pocket_spend(db, user_id, category, amount)
+            if result.get("success"):
                 db.commit()
-
-                return {
-                    "success": True,
-                    "pocket_id": target_pocket.id,
-                    "pocket_name": target_pocket.name,
-                    "amount_added": amount,
-                    "new_spent": target_pocket.spent_mtd,
-                    "remaining": (
-                        target_pocket.monthly_limit
-                        - target_pocket.spent_mtd
-                        + (target_pocket.rollover_balance or 0)
-                    ),
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": "No matching pocket found for category"
-                }
+            return result
         except Exception as e:
             db.rollback()
             logger.error(f"Error updating pocket spending by category: {str(e)}")
