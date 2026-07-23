@@ -43,7 +43,7 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this exact shape
   "is_bill": true,
   "amount": 0.0,
   "merchant": "store or payee name",
-  "category": "food|transport|shopping|utilities|health|entertainment|education|other",
+  "category": "food|groceries|transport|shopping|bills|rent|health|education|entertainment|subscriptions|travel|gifts|other",
   "date": "YYYY-MM-DD or null if not visible",
   "currency": "INR",
   "notes": "short note, e.g. items or bill type",
@@ -56,7 +56,7 @@ Rules:
 - amount must be a positive number if this is a payment/bill; use 0 if unreadable.
 - confidence 0.0–1.0 how sure you are about the total amount.
 - needs_confirmation true if the total is ambiguous, multiple totals, or confidence < 0.75.
-- category: best guess from merchant/items (food, transport, shopping, utilities, health, entertainment, education, other).
+- category: best guess from merchant/items using the category list in the JSON shape.
 - If the image is NOT a bill/receipt/payment (e.g. random selfie), set is_bill false, amount 0, explain in summary.
 """
 
@@ -297,15 +297,11 @@ def _to_extraction(data: Dict[str, Any], raw_content: str) -> BillExtraction:
     confidence = max(0.0, min(1.0, confidence))
 
     category = (data.get("category") or "other").strip().lower()
+    category = {"utilities": "bills"}.get(category, category)
     allowed = {
-        "food",
-        "transport",
-        "shopping",
-        "utilities",
-        "health",
-        "entertainment",
-        "education",
-        "other",
+        "food", "groceries", "transport", "shopping", "bills", "rent",
+        "health", "education", "entertainment", "subscriptions", "travel",
+        "gifts", "other",
     }
     if category not in allowed:
         category = "other"

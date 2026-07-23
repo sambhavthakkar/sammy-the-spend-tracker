@@ -102,6 +102,25 @@ class TestPersonalStore(unittest.TestCase):
         self.assertTrue(self.store.delete_transaction(self.alice, largest["id"]))
         self.assertFalse(self.store.delete_transaction(self.alice, largest["id"]))
 
+    def test_spending_summary_breaks_down_where_money_went(self):
+        self.store.record_transaction(self.alice, "expense", "30", "transport")
+        self.store.record_transaction(self.alice, "expense", "10", "food")
+        self.store.record_transaction(self.alice, "refund", "2", "food")
+
+        summary = self.store.spending_summary(self.alice)
+
+        self.assertEqual(summary["total"], Decimal("38"))
+        self.assertEqual(summary["by_category"], [
+            {
+                "category": "transport", "count": 1,
+                "total": Decimal("30"), "percentage": Decimal("78.9"),
+            },
+            {
+                "category": "food", "count": 1,
+                "total": Decimal("8"), "percentage": Decimal("21.1"),
+            },
+        ])
+
     def test_period_boundaries_use_user_local_half_open_utc(self):
         self.store.update_profile(self.alice, timezone="America/Los_Angeles")
         now = datetime(2026, 1, 2, 0, 30, tzinfo=UTC)  # Jan 1, 16:30 local

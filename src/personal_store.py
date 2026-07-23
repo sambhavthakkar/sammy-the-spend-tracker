@@ -721,12 +721,42 @@ class PersonalStore:
                    ORDER BY amount_minor DESC, occurred_at DESC LIMIT 1""",
                 params,
             ).fetchone()
+            category_rows = db.execute(
+                """SELECT category,
+                          SUM(CASE WHEN kind = 'expense' THEN 1 ELSE 0 END) AS count,
+                          SUM(CASE WHEN kind = 'expense' THEN amount_minor
+                                   WHEN kind = 'refund' THEN -amount_minor ELSE 0 END) AS total_minor
+                   FROM transactions
+                   WHERE deleted_at IS NULL
+                     AND kind IN ('expense', 'refund')
+                     AND (? IS NULL OR occurred_at >= ?)
+                     AND (? IS NULL OR occurred_at < ?)
+                     AND (? IS NULL OR category = ?)
+                   GROUP BY category
+                   HAVING total_minor != 0
+                   ORDER BY total_minor DESC, category""",
+                params,
+            ).fetchall()
         count, total = int(row["count"] or 0), _money(row["total_minor"])
         average = (total / count).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if count else Decimal("0")
+        by_category = []
+        for item in category_rows:
+            amount = _money(item["total_minor"])
+            percentage = (
+                (amount * 100 / total).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+                if total else Decimal("0")
+            )
+            by_category.append({
+                "category": item["category"],
+                "count": int(item["count"] or 0),
+                "total": amount,
+                "percentage": percentage,
+            })
         return {
             "count": count,
             "total": total,
             "average": average,
+            "by_category": by_category,
             "max_transaction": self._transaction(maximum),
         }
 

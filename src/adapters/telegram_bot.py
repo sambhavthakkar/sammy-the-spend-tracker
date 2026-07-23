@@ -10,6 +10,7 @@ import asyncio
 import math
 import os
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Set
 
@@ -34,6 +35,31 @@ def _source_ref(update_id: object, source: str) -> str:
     return f"telegram:{update_id}:{source}"
 
 
+def _format_spending_report(report: dict, currency: str) -> str:
+    money = lambda value: f"{Decimal(str(value)):,.2f}"
+    count = int(report.get("count") or 0)
+    if not count:
+        return "📊 No expenses recorded this month yet."
+
+    lines = [
+        "📊 This month’s spending",
+        f"💸 Total: {currency} {money(report['total'])}",
+        f"🧾 {count} expense{'s' if count != 1 else ''}",
+        "",
+        "Where it went:",
+    ]
+    for item in report.get("by_category") or []:
+        category = str(item["category"]).replace("_", " ").title()
+        lines.append(
+            f"• {category}: {currency} {money(item['total'])} ({item['percentage']}%)"
+        )
+    maximum = report.get("max_transaction")
+    if maximum:
+        label = maximum.get("description") or maximum.get("category") or "expense"
+        lines.extend(("", f"🔝 Largest: {currency} {money(maximum['amount'])} — {label}"))
+    return "\n".join(lines)
+
+
 def _user_lock(locks: dict[str, asyncio.Lock], user_id: str) -> asyncio.Lock:
     # ponytail: 200 users make retained locks harmless; prune if this grows to thousands.
     lock = locks.get(user_id)
@@ -53,6 +79,27 @@ async def _run_limited(limit: asyncio.Semaphore, func, /, *args, **kwargs):
             except Exception:
                 pass
             raise
+
+
+async def _reply_text(message, text: str):
+    from telegram.error import NetworkError, RetryAfter
+
+    for attempt in range(3):
+        try:
+            return await message.reply_text(
+                text, connect_timeout=15, read_timeout=30, write_timeout=30
+            )
+        except RetryAfter as exc:
+            if attempt == 2:
+                raise
+            delay = exc.retry_after
+            delay = delay.total_seconds() if hasattr(delay, "total_seconds") else float(delay)
+        except NetworkError:
+            if attempt == 2:
+                raise
+            delay = attempt + 1
+        logger.warning(f"Telegram reply failed; retrying in {delay:g}s")
+        await asyncio.sleep(delay)
 
 
 def _prepare_bill_confirmation(
@@ -177,24 +224,36 @@ def run_telegram_bot() -> None:
         if not user_id or not update.effective_message:
             return
         name = update.effective_user.full_name if update.effective_user else "there"
-        await update.effective_message.reply_text(
-            f"Hi {name}! I'm your private personal assistant.\n\n"
-            "Talk to me naturally. I can remember preferences, goals, and events, "
-            "help manage spending, and answer questions using what you've shared.\n\n"
-            "You can type, send a voice note, or send a clear bill photo."
+        await _reply_text(
+            update.effective_message,
+            f"Hi {name}! I’m your private spending assistant.\n\n"
+            "Tell me expenses naturally, such as ‘spent 450 on groceries’. "
+            "I’ll choose a category and keep the exact ledger.\n\n"
+            "Send /report anytime for this month’s breakdown."
         )
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await _ensure_user(update) or not update.effective_message:
             return
-        await update.effective_message.reply_text(
-            "Chat naturally with your private personal assistant. For example:\n"
-            "• remember that I prefer quiet restaurants\n"
-            "• my goal is to run a 10K this year\n"
-            "• I have a dentist appointment Friday\n"
-            "• spent 400 on groceries\n"
-            "• how much did I spend this month?\n"
-            "You can also send a voice note or a bill photo."
+        await _reply_text(
+            update.effective_message,
+            "Track spending naturally:\n"
+            "• spent 400 at Reliance Fresh\n"
+            "• paid 800 for fuel yesterday\n"
+            "• where did I spend this month?\n\n"
+            "Default categories: food, groceries, transport, shopping, bills, rent, "
+            "health, education, entertainment, subscriptions, travel, gifts, other.\n"
+            "Use /report for an instant monthly report. Voice notes and bill photos also work."
+        )
+
+    async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = await _ensure_user(update)
+        if not user_id or not update.effective_message:
+            return
+        report = store.spending_summary(user_id, "this_month")
+        currency = store.get_profile(user_id)["currency"]
+        await _reply_text(
+            update.effective_message, _format_spending_report(report, currency)
         )
 
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -223,7 +282,7 @@ def run_telegram_bot() -> None:
         reply = reply or "…"
         # Telegram message limit ~4096
         for i in range(0, len(reply), 3500):
-            await update.effective_message.reply_text(reply[i : i + 3500])
+            await _reply_text(update.effective_message, reply[i : i + 3500])
         store.mark_processed(user_id, "telegram", update_id)
 
     async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -299,7 +358,7 @@ def run_telegram_bot() -> None:
         )
         reply = reply or "…"
         for i in range(0, len(reply), 3500):
-            await update.effective_message.reply_text(reply[i : i + 3500])
+            await _reply_text(update.effective_message, reply[i : i + 3500])
         store.mark_processed(user_id, "telegram", update_id)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -373,18 +432,25 @@ def run_telegram_bot() -> None:
                 pass
 
         for i in range(0, len(reply), 3500):
-            await update.effective_message.reply_text(reply[i : i + 3500])
+            await _reply_text(update.effective_message, reply[i : i + 3500])
         store.mark_processed(user_id, "telegram", update_id)
 
     app = (
         Application.builder()
         .token(token)
+        .connect_timeout(15)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(10)
+        .get_updates_connect_timeout(15)
+        .get_updates_read_timeout(30)
         .concurrent_updates(Config.TELEGRAM_CONCURRENT_UPDATES)
         .post_shutdown(_shutdown)
         .build()
     )
     app.add_handler(CommandHandler("start", serialized(start_cmd)))
     app.add_handler(CommandHandler("help", serialized(help_cmd)))
+    app.add_handler(CommandHandler("report", serialized(report_cmd)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, serialized(on_text)))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, serialized(on_voice)))
     app.add_handler(MessageHandler(filters.PHOTO, serialized(on_photo)))
@@ -401,12 +467,14 @@ def run_telegram_bot() -> None:
             port=int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443")),
             url_path=token,
             webhook_url=Config.TELEGRAM_WEBHOOK_URL,
+            bootstrap_retries=-1,
             drop_pending_updates=False,
         )
     else:
         # Only one process may poll this token
         app.run_polling(
             allowed_updates=["message"],
+            bootstrap_retries=-1,
             drop_pending_updates=False,
         )
 

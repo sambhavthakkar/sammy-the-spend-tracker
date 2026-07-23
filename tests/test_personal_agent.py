@@ -63,7 +63,7 @@ class TestPersonalAgent(unittest.TestCase):
     def test_finance_write_and_summary_are_grounded_and_decimal_safe(self):
         llm = ScriptedLLM(
             ChatResponse(tool_calls=[ToolCall("write-1", "record_transaction", {
-                "kind": "expense", "amount": "12.34", "category": "food", "description": "lunch",
+                "kind": "expense", "amount": "12.34", "category": "restaurant", "description": "lunch",
             })]),
             ChatResponse(tool_calls=[ToolCall("sum-1", "spending_summary", {
                 "period": "today", "category": "food",
@@ -77,6 +77,7 @@ class TestPersonalAgent(unittest.TestCase):
         self.assertIn("12.34", answer)
         self.assertEqual(self.store.spending_summary(self.alice, "today")["total"], Decimal("12.34"))
         transaction = self.store.find_transactions(self.alice)[0]
+        self.assertEqual(transaction["category"], "food")
         self.assertEqual(transaction["source_ref"], "message-7:1")
         events = [row for row in self.store.recent_turns(self.alice) if row["role"] == "tool"]
         self.assertEqual([row["tool_name"] for row in events], ["record_transaction", "spending_summary"])

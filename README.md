@@ -9,7 +9,8 @@ A private AI assistant that chats normally, remembers personal context, and mana
 - The central `registry.sqlite3` stores only provider identity → opaque user UUID routing.
 - Flexible timestamped memories cover facts, events, preferences, and goals.
 - SQLite FTS5 recalls relevant memories and 30-day conversation snippets while only sending the latest eight turns by default.
-- Exact spending, balances, category limits, refunds, and largest purchases come from deterministic tools—not model guesses.
+- Exact spending, category breakdowns, balances, limits, refunds, and largest purchases come from deterministic tools—not model guesses.
+- New expenses use consistent default categories, and Telegram `/report` returns an instant monthly where-your-money-went report without an LLM call.
 - Sensitive writes use confirmation and the model never receives user IDs, paths, SQL, or another user's context.
 
 ## Quick start
@@ -42,6 +43,7 @@ Set `TELEGRAM_ALLOWED_USER_IDS` in `.env`; the bot refuses to start without an a
 - “I received ₹5,000 pocket money today.”
 - “Food should stay under ₹3,000 this month.”
 - “What was my largest food expense?”
+- `/report` for this month’s total, category breakdown, and largest expense.
 
 An expected monthly allowance is remembered; money is added to the ledger only when the user says it was actually received.
 

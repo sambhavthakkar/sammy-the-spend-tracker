@@ -4,10 +4,15 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from decimal import Decimal
+from unittest.mock import AsyncMock, patch
+
+from telegram.error import TimedOut
 
 from src.adapters.telegram_bot import (
+    _format_spending_report,
     _prepare_bill_confirmation,
+    _reply_text,
     _run_limited,
     _source_ref,
     _user_lock,
@@ -73,6 +78,25 @@ class TestChannelIntegration(unittest.TestCase):
         self.assertEqual(len(self.store.find_transactions(user_key)), 1)
         self.assertIsNone(self.store.get_pending_action(user_key))
 
+    def test_monthly_report_is_clear_and_deterministic(self):
+        report = {
+            "count": 2,
+            "total": Decimal("50"),
+            "by_category": [{
+                "category": "food", "count": 2,
+                "total": Decimal("50"), "percentage": Decimal("100.0"),
+            }],
+            "max_transaction": {
+                "amount": Decimal("35"), "description": "Dinner", "category": "food",
+            },
+        }
+
+        text = _format_spending_report(report, "INR")
+
+        self.assertIn("Total: INR 50.00", text)
+        self.assertIn("Food: INR 50.00 (100.0%)", text)
+        self.assertIn("Largest: INR 35.00 — Dinner", text)
+
     def test_unreadable_bill_only_records_conversation(self):
         user_key = self.store.resolve_user("telegram", "42")
 
@@ -90,6 +114,17 @@ class TestChannelIntegration(unittest.TestCase):
 
 
 class TestConcurrency(unittest.IsolatedAsyncioTestCase):
+    @patch("src.adapters.telegram_bot.asyncio.sleep", new_callable=AsyncMock)
+    async def test_reply_retries_network_timeout(self, sleep):
+        message = AsyncMock()
+        message.reply_text.side_effect = [TimedOut("timeout"), "sent"]
+
+        result = await _reply_text(message, "hello")
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(message.reply_text.await_count, 2)
+        sleep.assert_awaited_once_with(1)
+
     async def test_work_is_bounded_and_user_locks_are_stable(self):
         locks = {}
         self.assertIs(_user_lock(locks, "a"), _user_lock(locks, "a"))

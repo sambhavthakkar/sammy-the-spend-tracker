@@ -38,9 +38,31 @@ _PERIOD = {"type": "string", "enum": [
     "last_month", "this_year", "all",
 ]}
 _KIND = {"type": "string", "enum": ["expense", "income", "refund", "pocket_money"]}
+_DEFAULT_CATEGORIES = (
+    "food", "groceries", "transport", "shopping", "bills", "rent",
+    "health", "education", "entertainment", "subscriptions", "travel",
+    "gifts", "other",
+)
+_CATEGORY = {
+    "type": "string", "enum": list(_DEFAULT_CATEGORIES),
+    "description": "Choose the closest default category; use other only when none fits.",
+}
+_CATEGORY_ALIASES = {
+    "dining": "food", "restaurant": "food", "fuel": "transport",
+    "cab": "transport", "utility": "bills", "utilities": "bills",
+    "medical": "health",
+}
+
+
+def _default_category(value: Any) -> str:
+    category = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().casefold()).strip("_")
+    category = _CATEGORY_ALIASES.get(category, category)
+    return category if category in _DEFAULT_CATEGORIES else "other"
+
+
 TOOLS = [
     _schema("record_transaction", "Record money actually paid or received.", {
-        "kind": _KIND, "amount": _AMOUNT, "category": {"type": "string"},
+        "kind": _KIND, "amount": _AMOUNT, "category": _CATEGORY,
         "occurred_at": {"type": "string"}, "description": {"type": "string"},
         "currency": {"type": "string"},
     }, ("kind", "amount", "category")),
@@ -50,7 +72,7 @@ TOOLS = [
     }),
     _schema("update_transaction", "Update one recorded transaction by id.", {
         "transaction_id": {"type": "string"}, "kind": _KIND, "amount": _AMOUNT,
-        "category": {"type": "string"}, "occurred_at": {"type": "string"},
+        "category": _CATEGORY, "occurred_at": {"type": "string"},
         "description": {"type": ["string", "null"]}, "currency": {"type": "string"},
     }, ("transaction_id",)),
     _schema("delete_transaction", "Delete one recorded transaction by id.", {
@@ -87,11 +109,11 @@ _ALLOWED = {
     for tool in TOOLS
 }
 
-_SYSTEM = """You are a warm personal conversational assistant. Normal chat is allowed and is the default; do not force tools.
+_SYSTEM = f"""You are a warm personal spending assistant who can also remember useful personal context. Normal chat is allowed; do not force finance tools when the user is not talking about money.
+For a clear statement that money was spent, received, or refunded, call record_transaction instead of merely acknowledging it. Infer the closest category without asking: {", ".join(_DEFAULT_CATEGORIES)}. Use other only when none fits. Do not invent an amount; when the amount is missing, ask one concise question. Use the current date when no date is stated.
+Transactions are the sole truth for money actually paid or received, so use finance tools before stating finance facts. For requests such as “report”, “where did I spend”, or “this month’s spending”, call spending_summary and clearly show the total, category breakdown, transaction count, and largest expense. Expected pocket money is a memory; pocket money actually received is a pocket_money transaction. A category limit is a planned cap and is not the largest historical spend.
 Use memories naturally when relevant, without announcing database retrieval. Only call remember for an explicit durable fact, event, preference, or goal. Never store passwords, PINs, tokens, keys, card/account numbers, or other secrets; refuse that memory request.
-Transactions are the sole truth for money actually paid or received, so use finance tools before stating finance facts. Expected pocket money is a memory; pocket money actually received is a pocket_money transaction. A category limit is a planned cap and is not the largest historical spend.
-When required details are genuinely ambiguous, ask one concise clarification question. Never claim that anything was recorded, logged, updated, deleted, remembered, or otherwise written unless the corresponding tool succeeded. If a tool reports an error or asks for confirmation, say so honestly.
-Tools are server-bound to the current user. Never request or invent user IDs, file paths, database paths, SQL, or source references."""
+Never claim that anything was recorded, logged, updated, deleted, remembered, or otherwise written unless the corresponding tool succeeded. If a tool reports an error or asks for confirmation, say so honestly. Tools are server-bound to the current user. Never request or invent user IDs, file paths, database paths, SQL, or source references."""
 
 
 class PersonalAgent:
@@ -188,6 +210,10 @@ class PersonalAgent:
         unknown = set(args) - _ALLOWED[call.name]
         if unknown:
             return {"ok": False, "error": f"unsupported arguments: {', '.join(sorted(unknown))}"}, None
+        if call.name == "record_transaction":
+            args["category"] = _default_category(args.get("category"))
+        elif call.name == "update_transaction" and "category" in args:
+            args["category"] = _default_category(args["category"])
         if call.name == "record_transaction" and source_ref is not None:
             args["source_ref"] = source_ref
         if self._needs_confirmation(call.name, args):
