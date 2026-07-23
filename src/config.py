@@ -91,6 +91,8 @@ class Config:
 
     # Feature flags
     ENABLE_VOICE_PROCESSING: bool = os.getenv('ENABLE_VOICE_PROCESSING', 'True').lower() == 'true'
+    # Bill photos via Gemma vision (Ollama) — not classic OCR
+    ENABLE_BILL_VISION: bool = os.getenv('ENABLE_BILL_VISION', 'True').lower() == 'true'
     ENABLE_OCR_PROCESSING: bool = os.getenv('ENABLE_OCR_PROCESSING', 'False').lower() == 'true'
     ENABLE_ANALYTICS: bool = os.getenv('ENABLE_ANALYTICS', 'True').lower() == 'true'
     ENABLE_AGENT: bool = os.getenv('ENABLE_AGENT', 'True').lower() == 'true'

@@ -51,15 +51,25 @@ Voice uses **local Whisper** by default (`faster-whisper`):
 
 ```bash
 pip install faster-whisper
-# .env (defaults already enable voice):
 # ENABLE_VOICE_PROCESSING=True
 # STT_PROVIDER=auto
 # STT_MODEL=base
 ```
 
-Send a Telegram voice note: *“lunch two hundred fifty”* → bot replies with transcript + logs expense.
+Send a Telegram voice note: *“lunch two hundred fifty”*.
 
-Alternative: OpenAI-compatible STT — set `STT_PROVIDER=openai`, `STT_BASE_URL`, `STT_API_KEY`, `STT_MODEL=whisper-1`.
+### Bill / receipt photos (Gemma vision)
+
+Send a clear **photo** of a bill, receipt, or UPI screenshot.  
+Uses your **same Ollama Gemma model** (vision) — no Tesseract/OCR service.
+
+```bash
+# .env
+ENABLE_BILL_VISION=True
+OLLAMA_MODEL=gemma4:31b-cloud
+```
+
+Bot replies with what it saw; low confidence → asks **yes/no** before logging.
 
 ### Other modes
 

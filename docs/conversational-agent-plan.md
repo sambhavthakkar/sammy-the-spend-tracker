@@ -13,6 +13,7 @@
 | 2 Telegram text | Scaffolded | `python main.py telegram` + allowlist + dedupe |
 | 3 Confirmations | Partial | pending_actions + large-amount confirm in tools |
 | 4 Voice STT | Done | `faster_whisper` + OpenAI-compatible HTTP; Telegram voice wired |
+| 4b Bill vision | Done | Gemma multimodal only; Telegram photo → log_expense source=bill |
 | 5 Rich analytics | Partial | query_spending / breakdown / top_expenses services |
 | 6 Hardening | Pending | webhook secrets, rate limits, README rewrite |
 

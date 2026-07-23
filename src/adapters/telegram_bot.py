@@ -96,7 +96,8 @@ def run_telegram_bot() -> None:
             "• set income to 80000\n\n"
             f"Starter pockets: {pocket_line}\n"
             "Tip: set your monthly income so “how much left?” is meaningful.\n"
-            "Voice notes: say something like “lunch two hundred fifty”."
+            "Voice: say “lunch two hundred fifty”.\n"
+            "Bills: send a clear photo of the receipt — Gemma reads it."
         )
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,7 +113,8 @@ def run_telegram_bot() -> None:
                 "• change last to transport\n"
                 "• delete last\n"
                 "• set food pocket to 10000\n"
-                "• voice note: “spent 400 on petrol”"
+                "• voice note: “spent 400 on petrol”\n"
+                "• photo of a bill / receipt / UPI screenshot"
             )
 
     async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,6 +209,79 @@ def run_telegram_bot() -> None:
         for i in range(0, len(reply), 3500):
             await update.effective_message.reply_text(reply[i : i + 3500])
 
+    async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Bill / receipt photo → Gemma vision → log expense."""
+        if not update.effective_message:
+            return
+        user_id = await _ensure_user(update)
+        if not user_id:
+            return
+
+        update_id = str(update.update_id)
+        if not SessionStore.try_mark_processed("telegram", update_id, user_id):
+            return
+
+        if not Config.ENABLE_BILL_VISION:
+            await update.effective_message.reply_text(
+                "Bill photos are disabled. Set ENABLE_BILL_VISION=True in .env."
+            )
+            return
+
+        import os
+        from pathlib import Path
+
+        from src.agent.bill_pipeline import handle_bill_image
+
+        # Prefer highest resolution photo; also accept image documents
+        mime = "image/jpeg"
+        file_id = None
+        if update.effective_message.photo:
+            file_id = update.effective_message.photo[-1].file_id
+            mime = "image/jpeg"
+        elif update.effective_message.document and (
+            update.effective_message.document.mime_type or ""
+        ).startswith("image/"):
+            file_id = update.effective_message.document.file_id
+            mime = update.effective_message.document.mime_type or "image/jpeg"
+        else:
+            return
+
+        await update.effective_message.chat.send_action("upload_photo")
+        tg_file = await context.bot.get_file(file_id)
+        dest = Path(Config.UPLOAD_FOLDER) / "bills" / f"{user_id}_{update_id}.jpg"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        await tg_file.download_to_drive(str(dest))
+
+        caption = (update.effective_message.caption or "").strip()
+        await update.effective_message.reply_text(
+            "Reading bill with Gemma… (a few seconds)"
+        )
+        await update.effective_message.chat.send_action("typing")
+
+        try:
+            result = await asyncio.to_thread(
+                handle_bill_image, user_id, dest, mime
+            )
+            reply = result.text or "…"
+            # If user added a caption like "this was transport", fold into follow-up
+            if caption and result.text and "Log this?" not in (result.text or ""):
+                # Optional: pass caption to agent as correction hint next turn
+                SessionStore.append_turn(user_id, "user", f"[bill caption] {caption}")
+        except Exception as e:
+            logger.error(f"Bill photo failed: {e}")
+            reply = (
+                "I couldn't read that image with Gemma. "
+                "Send a clearer photo of the total, or type e.g. `swiggy 450`."
+            )
+        finally:
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        for i in range(0, len(reply), 3500):
+            await update.effective_message.reply_text(reply[i : i + 3500])
+
     app = (
         Application.builder()
         .token(token)
@@ -216,21 +291,30 @@ def run_telegram_bot() -> None:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(
+        MessageHandler(filters.Document.IMAGE, on_photo)
+    )
 
     mode = (Config.TELEGRAM_MODE or "polling").lower()
     logger.info(f"Starting Telegram bot mode={mode}")
     print(f"📱 Telegram bot starting (mode={mode})…")
     if mode == "webhook" and Config.TELEGRAM_WEBHOOK_URL:
-        # Basic webhook; production should set secrets / paths carefully
         app.run_webhook(
             listen="0.0.0.0",
             port=int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443")),
             url_path=token,
             webhook_url=Config.TELEGRAM_WEBHOOK_URL,
+            drop_pending_updates=True,
         )
     else:
-        app.run_polling(allowed_updates=["message"])
+        # Only one process may poll this token
+        app.run_polling(
+            allowed_updates=["message"],
+            drop_pending_updates=True,
+        )
 
 
 # Avoid NameError in webhook branch without top-level import always
 import os  # noqa: E402
+

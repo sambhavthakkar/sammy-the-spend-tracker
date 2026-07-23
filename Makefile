@@ -73,8 +73,13 @@ db-shell: ## Open sqlite3 on local DB (if present)
 agent: ## Run conversational agent CLI
 	@$(PY) main.py agent
 
-telegram: ## Run Telegram bot (foreground — leave running)
+telegram: ## Run Telegram bot (stops other local instances first)
+	@echo "Stopping any other local bot instances..."
+	@-pkill -f 'python main.py telegram' 2>/dev/null || true
+	@-pkill -f 'main.py telegram' 2>/dev/null || true
+	@sleep 1
 	@echo "Starting Telegram bot (Ctrl+C to stop)..."
+	@echo "Tip: only ONE process may poll this bot token."
 	@$(PY) main.py telegram
 
 api: ## Run Flask API on :5000
@@ -84,7 +89,7 @@ cli: ## Run legacy CLI
 	@$(PY) main.py cli
 
 test: ## Run unit tests
-	@$(PY) -m pytest tests/test_dates.py tests/test_tools_and_services.py tests/test_stt.py -q
+	@$(PY) -m pytest tests/test_dates.py tests/test_tools_and_services.py tests/test_stt.py tests/test_bill_vision.py -q
 
 status: ## Show env/bot readiness (no secrets printed)
 	@$(PY) -c "from src.config import Config; \
