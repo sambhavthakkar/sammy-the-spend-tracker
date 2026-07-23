@@ -14,9 +14,9 @@ export PYTHONPATH := .
 # SQLite path used by default DATABASE_URL
 DB_FILE     ?= budgetbot.db
 
-.PHONY: help venv install install-voice env db-init db-reset db-shell \
+.PHONY: help venv install install-voice env db-init db-reset db-fresh-notify db-shell \
 	agent telegram api cli test clean docker-build docker-up docker-down \
-	docker-logs deploy stop status
+	docker-logs docker-telegram deploy stop status
 
 help: ## Show this help
 	@echo "BudgetBot make targets"
@@ -24,8 +24,12 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Typical flow:"
-	@echo "  make install env db-reset telegram"
+	@echo "Typical flow (keeps data):"
+	@echo "  make install env && make telegram"
+	@echo ""
+	@echo "Wipe data only when you mean it:"
+	@echo "  make db-reset           # silent wipe"
+	@echo "  make db-fresh-notify    # notify users + wipe"
 
 venv: ## Create virtualenv if missing
 	@test -d $(VENV) || $(PYTHON) -m venv $(VENV)

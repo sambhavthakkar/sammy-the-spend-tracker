@@ -50,7 +50,8 @@ def run_telegram_bot() -> None:
             f"Details: {e}"
         ) from e
 
-    init_db()
+    # Ensure schema exists only — never deletes user data
+    init_db(reset=False)
     pipeline = AgentPipeline()
 
     async def _ensure_user(update: Update) -> Optional[str]:
