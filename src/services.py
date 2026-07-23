@@ -874,13 +874,17 @@ class TransactionService:
                 }
 
             # Update allowed fields
-            allowed_fields = ['amount', 'category', 'merchant', 'notes', 'timestamp']
+            allowed_fields = ['amount', 'category', 'merchant', 'notes', 'timestamp', 'direction']
             for field, value in kwargs.items():
                 if field in allowed_fields and value is not None and hasattr(transaction, field):
                     if field == 'category' and isinstance(value, str):
                         value = value.lower().strip()
                     if field == 'amount':
                         value = float(value)
+                    if field == 'direction' and isinstance(value, str):
+                        value = value.lower().strip()
+                        if value not in ('expense', 'income'):
+                            continue
                     setattr(transaction, field, value)
 
             transaction.updated_at = datetime.utcnow()
@@ -1250,6 +1254,7 @@ class BudgetService:
                 "period_start": period_start.isoformat(),
                 "period_end": period_end.isoformat(),
                 "total_income": user.income,
+                "total_received_mtd": total_received,
                 "total_committed": total_committed,
                 "available_to_spend": available_to_spend,
                 "total_spent": total_spent,

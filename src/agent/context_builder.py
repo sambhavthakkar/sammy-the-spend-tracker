@@ -72,10 +72,19 @@ class ContextBuilder:
         else:
             for t in recent:
                 tid = (t.get("id") or "")[:8]
+                direction = t.get("direction") or "expense"
                 lines.append(
-                    f"- id={tid}… date={t.get('timestamp')} amount={t.get('amount')} "
-                    f"category={t.get('category')} merchant={t.get('merchant')}"
+                    f"- id={tid}… {direction} date={t.get('timestamp')} "
+                    f"amount={t.get('amount')} category={t.get('category')} "
+                    f"merchant={t.get('merchant')}"
                 )
+        lines.append("")
+        lines.append(
+            "## Smart layer note\n"
+            "Income logging is fully supported (log_income / log_money). "
+            "If user describes any money-in situation, resolve it with tools — "
+            "do not say the feature is missing."
+        )
         lines.append("")
 
         snap_wrap = ctx.get("snapshot") or {}

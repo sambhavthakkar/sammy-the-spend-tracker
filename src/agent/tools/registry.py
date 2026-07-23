@@ -143,19 +143,58 @@ def handle_log_expense(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_log_income(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Money received / refund / transfer in (smart layer)."""
+    """
+    Money received / refund / transfer in / any unmanaged inflow.
+
+    Smart layer should call this for ANY money-in intent, even if the
+    category/source is unusual — capture it with notes rather than failing.
+    """
     amount = float(args.get("amount") or 0)
     if amount <= 0:
-        return {"ok": False, "error": "amount must be > 0"}
+        return {"ok": False, "error": "amount must be > 0 — ask user for the amount"}
 
     tz = _user_tz(user_id)
     date_str = args.get("date")
     ts = _resolve_txn_timestamp(date_str, tz)
     source = args.get("source") or "text"
-    # merchant = who paid / source of money
-    merchant = args.get("merchant") or args.get("from") or args.get("payer") or "Received"
-    category = args.get("category") or args.get("against") or "other"
-    notes = args.get("notes") or ""
+
+    merchant = (
+        args.get("merchant")
+        or args.get("from")
+        or args.get("payer")
+        or args.get("source_name")
+        or "Received"
+    )
+    category = (
+        args.get("category")
+        or args.get("against")
+        or args.get("pocket")
+        or "other"
+    )
+    category = str(category).strip().lower() or "other"
+    notes = (args.get("notes") or args.get("raw_text") or "").strip()
+    income_type = (args.get("income_type") or "received").strip().lower()
+    # gift | refund | salary | transfer | cashback | reimbursement | other
+    if income_type and income_type not in notes.lower():
+        notes = f"[{income_type}] {notes}".strip() if notes else f"[{income_type}]"
+
+    credit_pocket = args.get("credit_pocket")
+    if credit_pocket is None:
+        # Default: credit pocket when category is a real bucket, not generic "other"
+        credit_pocket = category not in ("other", "misc", "general", "income", "salary")
+
+    # Ensure pocket exists so "against X" always works as a feature
+    pocket_ensured = None
+    if credit_pocket and category not in ("other", "misc", "general", "income", "salary"):
+        pockets = PocketService.get_user_pockets(user_id)
+        names = {p["name"].lower() for p in pockets}
+        if category not in names:
+            # Title-case pocket name from category
+            pocket_name = category.replace("_", " ").strip().title()
+            limit = float(args.get("pocket_limit") or 5000)
+            pocket_ensured = PocketService.upsert_pocket(user_id, pocket_name, limit)
+            category = pocket_name.lower()
+
     payload = {
         "amount": amount,
         "category": category,
@@ -165,23 +204,40 @@ def handle_log_income(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
         "source": source,
         "date": date_str,
         "direction": "income",
+        "credit_pocket": bool(credit_pocket),
     }
     confirm = _maybe_confirm_amount(user_id, amount, "log_income", payload)
     if confirm:
-        confirm["message"] = f"Confirm received ₹{amount:.0f} from {merchant}? Reply yes or no."
+        confirm["message"] = (
+            f"Confirm received ₹{amount:.0f} from {merchant}"
+            + (f" (against {category})" if credit_pocket else "")
+            + "? Reply yes or no."
+        )
         return confirm
+
+    # If not crediting pocket, force category path that won't reverse pocket spend badly:
+    # still store category for filtering; pocket credit only when credit_pocket
+    direction_category = category if credit_pocket else "other"
+    # Keep user's category in notes if we collapse to other for pocket logic
+    final_notes = notes
+    if not credit_pocket and category not in ("other", "misc"):
+        final_notes = f"{notes} | tag:{category}".strip(" |")
 
     result = TransactionService.log_expense_structured(
         user_id=user_id,
         amount=amount,
-        category=category,
+        category=direction_category if credit_pocket else category,
         merchant=merchant,
-        notes=notes,
+        notes=final_notes,
         mode=args.get("mode") or "personal",
         source=source,
         timestamp=ts,
         direction="income",
     )
+    if isinstance(result, dict):
+        result["pocket_ensured"] = pocket_ensured
+        result["income_type"] = income_type
+        result["credit_pocket"] = bool(credit_pocket)
     return result
 
 
@@ -193,7 +249,7 @@ def handle_update_transaction(user_id: str, args: Dict[str, Any]) -> Dict[str, A
         return {"ok": False, "error": "transaction not found"}
 
     fields = {}
-    for key in ("amount", "category", "merchant", "notes"):
+    for key in ("amount", "category", "merchant", "notes", "direction"):
         if key in args and args[key] is not None:
             fields[key] = args[key]
 
@@ -383,10 +439,14 @@ def get_default_registry() -> ToolRegistry:
         ToolSpec(
             name="log_income",
             description=(
-                "Log money IN: received, got, refund, salary credit, transfer from someone. "
+                "Log ANY money IN (received/got/refund/cashback/gift/freelance/salary credit/"
+                "transfer from someone/reimbursement). Use this whenever money came TO the user, "
+                "even if the case is unusual — capture it; do not refuse. "
                 "Examples: 'received 5000 from mom', 'got refund 200 amazon', "
-                "'received 1500 against food' (set category=food to credit food pocket). "
-                "merchant/from = who paid; category/against = pocket if relevant."
+                "'received 1500 against food', 'cousin sent 800 for dinner share'. "
+                "merchant/from = who/what source. category/against/pocket = bucket to credit if any. "
+                "notes/raw_text = full meaning. income_type: gift|refund|salary|transfer|cashback|"
+                "reimbursement|freelance|other. credit_pocket true/false."
             ),
             parameters={
                 "type": "object",
@@ -394,21 +454,67 @@ def get_default_registry() -> ToolRegistry:
                     "amount": {"type": "number"},
                     "merchant": {
                         "type": "string",
-                        "description": "Who the money came from (mom, employer, amazon refund…)",
+                        "description": "Who/what the money came from",
                     },
                     "from": {"type": "string"},
+                    "payer": {"type": "string"},
                     "category": {
                         "type": "string",
-                        "description": "Optional pocket/category, e.g. food when 'against food'",
+                        "description": "Pocket/category if relevant (food, rent share, etc.)",
                     },
                     "against": {"type": "string"},
+                    "pocket": {"type": "string"},
                     "notes": {"type": "string"},
+                    "raw_text": {
+                        "type": "string",
+                        "description": "Original user message for searchability",
+                    },
+                    "income_type": {
+                        "type": "string",
+                        "description": "gift|refund|salary|transfer|cashback|reimbursement|freelance|other",
+                    },
+                    "credit_pocket": {
+                        "type": "boolean",
+                        "description": "If true, credit matching budget pocket (creates pocket if missing)",
+                    },
+                    "pocket_limit": {
+                        "type": "number",
+                        "description": "Monthly limit if creating a new pocket (default 5000)",
+                    },
                     "date": {"type": "string", "description": "YYYY-MM-DD"},
                     "source": {"type": "string", "enum": ["text", "voice", "bill"]},
                 },
                 "required": ["amount"],
             },
             handler=handle_log_income,
+        ),
+        ToolSpec(
+            name="log_money",
+            description=(
+                "Universal money logger when intent is mixed or you need one call. "
+                "direction must be 'expense' or 'income'. Prefer log_expense / log_income when clear; "
+                "use this as a smart catch-all so nothing money-related is dropped."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["expense", "income"]},
+                    "amount": {"type": "number"},
+                    "merchant": {"type": "string"},
+                    "category": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "raw_text": {"type": "string"},
+                    "date": {"type": "string"},
+                    "source": {"type": "string", "enum": ["text", "voice", "bill"]},
+                    "credit_pocket": {"type": "boolean"},
+                },
+                "required": ["direction", "amount"],
+            },
+            handler=lambda uid, args: (
+                handle_log_income(uid, args)
+                if (args.get("direction") or "").lower() == "income"
+                else handle_log_expense(uid, args)
+            ),
         ),
         ToolSpec(
             name="update_transaction",
