@@ -57,15 +57,22 @@ db-init: ## Create tables (keeps existing data)
 
 db-reset: ## Wipe local SQLite DB and recreate empty schema
 	@echo "Resetting database..."
-	@rm -f $(DB_FILE) ./budgetbot.db *.db-journal 2>/dev/null || true
+	@rm -f $(DB_FILE) ./budgetbot.db *.db-journal *.db-wal *.db-shm 2>/dev/null || true
 	@$(PY) -c "import src.database as db; \
 from sqlalchemy import inspect; \
 db.init_db(reset=True); \
 tables = inspect(db.engine).get_table_names(); \
 print('Wiped and recreated DB:', db.get_database_url()); \
 print('Tables:', ', '.join(sorted(tables)))"
-	@rm -rf uploads/voice/* 2>/dev/null || true
-	@echo "Voice cache cleared under uploads/voice/"
+	@rm -rf uploads/voice/* uploads/bills/* 2>/dev/null || true
+	@echo "Voice/bill cache cleared"
+
+db-fresh-notify: ## Notify all Telegram users, then wipe DB (fresh start)
+	@echo "Stopping local bot so DB file can be wiped..."
+	@-pkill -f 'main.py telegram' 2>/dev/null || true
+	@sleep 1
+	@$(PY) scripts/reset_and_notify.py
+	@echo "Start bot again with: make telegram"
 
 db-shell: ## Open sqlite3 on local DB (if present)
 	@sqlite3 $(DB_FILE)
