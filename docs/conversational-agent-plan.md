@@ -43,9 +43,11 @@ Deletes and forgetting always require confirmation. Large writes use `AGENT_CONF
 
 ## Memory
 
-Memories are explicit facts, events, preferences, or goals with learned and optional occurred timestamps. Retrieval ranks at most 200 active memories by lexical overlap, salience, and recency, then sends only the best few to the model.
+Memories are explicit facts, events, preferences, or goals with learned and optional occurred timestamps. SQLite FTS5 searches every active memory, then lexical relevance, salience, and recency choose the few sent to the model.
 
-No graph or vector database is used. Add SQLite FTS5 only when a personal database grows beyond the bounded scan; add embeddings only after measured lexical recall failures.
+Each request also receives the latest eight conversational turns and up to three relevant snippets from the previous 30 days. Ordinary user/assistant chat older than 90 days is pruned while the latest eight turns, transactions, durable memories, and tool events remain.
+
+No graph or vector database is used. Add embeddings only after measured FTS/lexical recall failures.
 
 ## Privacy limits
 

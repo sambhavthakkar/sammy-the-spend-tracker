@@ -30,7 +30,27 @@ _SECRET_RE = re.compile(
     r"|\b(?:card|account|acct)(?:\s+number|\s+no\.?|\s*#)?\b.{0,12}\b\d[\d -]{6,}\d\b"
     r"|(?<!\d)\d(?:[ -]?\d){11,18}(?!\d)"
 )
-_WORD_RE = re.compile(r"[a-z0-9]+")
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_STOP_WORDS = {
+    "a", "an", "and", "are", "did", "do", "for", "from", "i", "in", "is",
+    "it", "me", "my", "of", "on", "the", "to", "was", "we", "what", "when",
+    "where", "which", "who", "with", "you", "your",
+}
+
+
+def _words(value: Any) -> list[str]:
+    return [
+        word for word in _WORD_RE.findall(str(value).casefold())
+        if len(word) > 1 and word not in _STOP_WORDS
+    ]
+
+
+def _query_words(value: Any) -> list[str]:
+    return _words(value)[:20]
+
+
+def _fts_query(value: Any) -> str:
+    return " OR ".join(f'"{word}"' for word in _query_words(value))
 
 
 def _now() -> datetime:
@@ -181,6 +201,60 @@ class PersonalStore:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
+    @staticmethod
+    def _init_fts(db: sqlite3.Connection) -> None:
+        memory_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'memory_fts'"
+        ).fetchone()
+        conversation_exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'conversation_fts'"
+        ).fetchone()
+        try:
+            db.executescript(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    content, details, content='memories', content_rowid='rowid'
+                );
+                CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+                    INSERT INTO memory_fts(rowid, content, details)
+                    VALUES (new.rowid, new.content, new.details);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
+                    INSERT INTO memory_fts(memory_fts, rowid, content, details)
+                    VALUES ('delete', old.rowid, old.content, old.details);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memory_fts(memory_fts, rowid, content, details)
+                    VALUES ('delete', old.rowid, old.content, old.details);
+                    INSERT INTO memory_fts(rowid, content, details)
+                    VALUES (new.rowid, new.content, new.details);
+                END;
+                CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
+                    content, content='conversation_turns', content_rowid='rowid'
+                );
+                CREATE TRIGGER IF NOT EXISTS conversation_fts_insert AFTER INSERT ON conversation_turns BEGIN
+                    INSERT INTO conversation_fts(rowid, content) VALUES (new.rowid, new.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS conversation_fts_delete AFTER DELETE ON conversation_turns BEGIN
+                    INSERT INTO conversation_fts(conversation_fts, rowid, content)
+                    VALUES ('delete', old.rowid, old.content);
+                END;
+                CREATE TRIGGER IF NOT EXISTS conversation_fts_update AFTER UPDATE ON conversation_turns BEGIN
+                    INSERT INTO conversation_fts(conversation_fts, rowid, content)
+                    VALUES ('delete', old.rowid, old.content);
+                    INSERT INTO conversation_fts(rowid, content) VALUES (new.rowid, new.content);
+                END;
+                """
+            )
+        except sqlite3.OperationalError as exc:
+            if "fts5" in str(exc).casefold():
+                return
+            raise
+        if not memory_exists:
+            db.execute("INSERT INTO memory_fts(memory_fts) VALUES ('rebuild')")
+        if not conversation_exists:
+            db.execute("INSERT INTO conversation_fts(conversation_fts) VALUES ('rebuild')")
+
     def user_db_path(self, user_key: str) -> Path:
         try:
             key = str(UUID(str(user_key)))
@@ -281,6 +355,7 @@ class PersonalStore:
                 );
                 """
             )
+            self._init_fts(db)
             stamp = _iso(_now())
             db.execute(
                 """INSERT OR IGNORE INTO profile
@@ -359,6 +434,98 @@ class PersonalStore:
             item["tool_payload"] = json.loads(item["tool_payload"]) if item["tool_payload"] else None
             result.append(item)
         return result
+
+    def recent_conversation_turns(
+        self, user_key: str, limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        count = Config.AGENT_MEMORY_TURNS if limit is None else max(0, min(int(limit), 200))
+        with self._user_db(user_key) as db:
+            rows = db.execute(
+                """SELECT * FROM conversation_turns
+                   WHERE role IN ('user', 'assistant')
+                   ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                (count,),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def search_conversation(
+        self,
+        user_key: str,
+        query: str,
+        days: int = 30,
+        limit: int = 3,
+        exclude_ids: set[str] | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        count = max(0, min(int(limit), 10))
+        expression = _fts_query(query)
+        if not expression or count == 0:
+            return []
+        current = now or _now()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
+        cutoff = _iso(current.astimezone(UTC) - timedelta(days=max(1, int(days))))
+        excluded = set(exclude_ids or ())
+        with self._user_db(user_key) as db:
+            has_fts = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'conversation_fts'"
+            ).fetchone()
+            if has_fts:
+                rows = db.execute(
+                    """SELECT t.* FROM conversation_fts
+                       JOIN conversation_turns AS t ON t.rowid = conversation_fts.rowid
+                       WHERE conversation_fts MATCH ?
+                         AND t.role IN ('user', 'assistant') AND t.created_at >= ?
+                       ORDER BY bm25(conversation_fts), t.created_at DESC LIMIT 100""",
+                    (expression, cutoff),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT * FROM conversation_turns
+                       WHERE role IN ('user', 'assistant') AND created_at >= ?
+                       ORDER BY created_at DESC""",
+                    (cutoff,),
+                ).fetchall()
+        query_words = set(_query_words(query))
+        ranked = []
+        for row in rows:
+            if row["id"] in excluded:
+                continue
+            words = set(_words(row["content"]))
+            score = len(query_words & words) / max(1, len(query_words))
+            if score:
+                ranked.append((score, row["created_at"], row))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [
+            {"id": item[2]["id"], "role": item[2]["role"], "content": item[2]["content"],
+             "created_at": item[2]["created_at"]}
+            for item in ranked[:count]
+        ]
+
+    def prune_conversation(
+        self,
+        user_key: str,
+        days: int = 90,
+        keep_recent: int | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        count = Config.AGENT_MEMORY_TURNS if keep_recent is None else max(0, int(keep_recent))
+        current = now or _now()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
+        cutoff = _iso(current.astimezone(UTC) - timedelta(days=max(1, int(days))))
+        with self._user_db(user_key) as db:
+            cursor = db.execute(
+                """DELETE FROM conversation_turns
+                   WHERE role IN ('user', 'assistant') AND created_at < ?
+                     AND id NOT IN (
+                         SELECT id FROM conversation_turns
+                         WHERE role IN ('user', 'assistant')
+                         ORDER BY created_at DESC, rowid DESC LIMIT ?
+                     )""",
+                (cutoff, count),
+            )
+            return cursor.rowcount
 
     def is_processed(self, user_key: str, provider: str, external_id: str) -> bool:
         with self._user_db(user_key) as db:
@@ -658,19 +825,39 @@ class PersonalStore:
         self, user_key: str, query: str = "", limit: int = 10, now: datetime | None = None,
     ) -> list[dict[str, Any]]:
         count = max(0, min(int(limit), 50))
+        expression = _fts_query(query)
         with self._user_db(user_key) as db:
-            rows = db.execute(
-                """SELECT * FROM memories WHERE status = 'active'
-                   ORDER BY learned_at DESC, rowid DESC LIMIT 200"""
-            ).fetchall()
-        query_words = set(_WORD_RE.findall(str(query).casefold()))
+            has_fts = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'memory_fts'"
+            ).fetchone()
+            if expression and has_fts:
+                matched = db.execute(
+                    """SELECT m.* FROM memory_fts
+                       JOIN memories AS m ON m.rowid = memory_fts.rowid
+                       WHERE memory_fts MATCH ? AND m.status = 'active'
+                       ORDER BY bm25(memory_fts) LIMIT ?""",
+                    (expression, max(50, count * 10)),
+                ).fetchall()
+                evergreen = db.execute(
+                    """SELECT * FROM memories WHERE status = 'active'
+                       ORDER BY salience DESC, learned_at DESC LIMIT 20"""
+                ).fetchall()
+                rows_by_id = {row["id"]: row for row in evergreen}
+                rows_by_id.update({row["id"]: row for row in matched})
+                rows = list(rows_by_id.values())
+            else:
+                rows = db.execute(
+                    """SELECT * FROM memories WHERE status = 'active'
+                       ORDER BY learned_at DESC, rowid DESC"""
+                ).fetchall()
+        query_words = set(_query_words(query))
         current = now or _now()
         if current.tzinfo is None:
             current = current.replace(tzinfo=UTC)
         current = current.astimezone(UTC)
         ranked = []
         for row in rows:
-            words = set(_WORD_RE.findall((row["kind"] + " " + row["content"] + " " + row["details"]).casefold()))
+            words = set(_words(row["kind"] + " " + row["content"] + " " + row["details"]))
             lexical = len(query_words & words) / max(1, len(query_words))
             learned = datetime.fromisoformat(row["learned_at"])
             age_days = max(0.0, (current - learned).total_seconds() / 86400)

@@ -102,6 +102,7 @@ class PersonalAgent:
 
     def chat(self, user_key: str, text: str, source: str = "text", source_ref: str | None = None) -> str:
         text = str(text).strip()
+        self.store.prune_conversation(user_key, days=90)
         pending = self.store.get_pending_action(user_key)
         answer = text.casefold().strip(" .!?")
         if pending and answer in _CONFIRM:
@@ -111,10 +112,20 @@ class PersonalAgent:
 
         profile = self.store.get_profile(user_key)
         memories = self.store.search_memories(user_key, text, limit=5)
-        turns = [turn for turn in self.store.recent_turns(user_key) if turn["role"] in {"user", "assistant"}]
+        turns = self.store.recent_conversation_turns(user_key)
+        snippets = self.store.search_conversation(
+            user_key,
+            text,
+            days=30,
+            limit=3,
+            exclude_ids={turn["id"] for turn in turns},
+        )
         local_now = datetime.now(ZoneInfo(profile["timezone"])).isoformat(timespec="seconds")
         context = _SYSTEM + "\n\nCurrent private context:\n" + _dumps({
-            "profile": profile, "local_clock": local_now, "relevant_memories": memories,
+            "profile": profile,
+            "local_clock": local_now,
+            "relevant_memories": memories,
+            "relevant_conversation_snippets": snippets,
             "input_source": str(source),
         })
         messages = [ChatMessage("system", context)]

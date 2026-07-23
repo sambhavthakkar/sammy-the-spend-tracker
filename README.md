@@ -8,6 +8,7 @@ A private AI assistant that chats normally, remembers personal context, and mana
 - Every identity gets a physically separate SQLite database under `personal_data/users/`.
 - The central `registry.sqlite3` stores only provider identity → opaque user UUID routing.
 - Flexible timestamped memories cover facts, events, preferences, and goals.
+- SQLite FTS5 recalls relevant memories and 30-day conversation snippets while only sending the latest eight turns by default.
 - Exact spending, balances, category limits, refunds, and largest purchases come from deterministic tools—not model guesses.
 - Sensitive writes use confirmation and the model never receives user IDs, paths, SQL, or another user's context.
 
@@ -80,7 +81,7 @@ The migration never changes or deletes `budgetbot.db`, verifies per-user counts 
 python -m pytest -q
 ```
 
-The focused checks cover physical user isolation, money precision, category limits, temporal memory, tool confirmations, normal chat, channel wiring, and migration idempotency.
+The focused checks cover physical user isolation, money precision, category limits, FTS memory/chat retrieval, 90-day chat pruning, tool confirmations, channel wiring, and migration idempotency.
 
 ## Docker
 
