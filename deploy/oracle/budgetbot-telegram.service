@@ -1,0 +1,27 @@
+[Unit]
+Description=BudgetBot private Telegram assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change User/Group/paths to match the Oracle VM account
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/budgetbot
+Environment=PYTHONPATH=/home/ubuntu/budgetbot
+Environment=PYTHONUNBUFFERED=1
+# Loads KEY=value from .env (no "export" lines)
+EnvironmentFile=/home/ubuntu/budgetbot/.env
+ExecStart=/home/ubuntu/budgetbot/.venv/bin/python -u main.py telegram
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Do NOT add ExecStartPre that deletes personal_data
+
+[Install]
+WantedBy=multi-user.target

@@ -5,7 +5,7 @@ PY := .venv/bin/python
 SESSION := budgetbot
 DATA_DIR := personal_data
 
-.PHONY: help setup bot logs stop reset broadcast test status
+.PHONY: help setup bot logs stop reset broadcast test status verify-data oracle-package
 
 help: ## Show commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
