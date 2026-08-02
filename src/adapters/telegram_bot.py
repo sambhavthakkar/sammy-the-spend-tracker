@@ -102,6 +102,31 @@ async def _reply_text(message, text: str):
         await asyncio.sleep(delay)
 
 
+async def handle_telegram_error(update: object, context) -> None:
+    """Log transient Telegram network issues quietly; full stacks for real bugs."""
+    from telegram.error import NetworkError, RetryAfter
+
+    err = getattr(context, "error", None)
+    if err is None:
+        return
+    if isinstance(err, RetryAfter):
+        delay = err.retry_after
+        delay_s = delay.total_seconds() if hasattr(delay, "total_seconds") else float(delay)
+        logger.warning("Telegram rate limited; retry after %.0fs", delay_s)
+        return
+    if isinstance(err, NetworkError):
+        # Includes TimedOut; polling already retries (bootstrap_retries=-1).
+        logger.warning("Telegram network error (will retry): %s", err)
+        return
+    update_id = getattr(update, "update_id", None) if update is not None else None
+    logger.error(
+        "Unhandled Telegram error update_id=%s: %s",
+        update_id,
+        err,
+        exc_info=err,
+    )
+
+
 def _prepare_bill_confirmation(
     store: PersonalStore,
     user_key: str,
@@ -457,6 +482,7 @@ def run_telegram_bot() -> None:
     app.add_handler(
         MessageHandler(filters.Document.IMAGE, serialized(on_photo))
     )
+    app.add_error_handler(handle_telegram_error)
 
     mode = (Config.TELEGRAM_MODE or "polling").lower()
     logger.info(f"Starting Telegram bot mode={mode}")

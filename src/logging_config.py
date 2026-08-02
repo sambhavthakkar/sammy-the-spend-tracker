@@ -8,6 +8,7 @@ import sys
 from logging.handlers import TimedRotatingFileHandler
 from pythonjsonlogger.json import JsonFormatter
 
+
 def setup_logger(name: str = 'budgetbot', level: int = logging.INFO) -> logging.Logger:
     """
     Set up and configure logger with JSON formatting and file rotation
@@ -69,17 +70,21 @@ def setup_logger(name: str = 'budgetbot', level: int = logging.INFO) -> logging.
 
     return logger
 
+
 def get_logger(name: str = 'budgetbot') -> logging.Logger:
     """
-    Get a logger instance
+    Get a logger under the configured ``budgetbot`` hierarchy.
 
-    Args:
-        name: Logger name
-
-    Returns:
-        Logger instance
+    Module loggers (``get_logger(__name__)``) become ``budgetbot.<module>`` so
+    they inherit the console/file handlers attached to ``budgetbot``.
     """
-    return logging.getLogger(name)
+    setup_logger()
+    if not name or name == 'budgetbot':
+        return logging.getLogger('budgetbot')
+    if name.startswith('budgetbot.'):
+        return logging.getLogger(name)
+    return logging.getLogger(f'budgetbot.{name}')
+
 
 # Initialize default logger
 logger = setup_logger()
